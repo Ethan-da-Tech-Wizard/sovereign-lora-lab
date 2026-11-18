@@ -1,5 +1,12 @@
-#!/usr/bin/env python3
-"""tests/test_dataset_verifier.py — Unit tests for dataset validation and splitting."""
+# ==============================================================================
+# Program: test_dataset_verifier.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Unit tests for dataset validation, schema checking, and train/dev splitting.
+#          Tests JSON structure verification, duplicate elimination, AST syntax
+#          error detection on Python code completions, and family-held-out disjointness.
+# ==============================================================================
 
 import json
 import tempfile
@@ -10,14 +17,19 @@ from datasets.verify_dataset import split_family_held_out, verify_file
 
 
 class TestDatasetVerifier(unittest.TestCase):
+    """Test suite for dataset audit gate and train/dev partitioner."""
+
     def setUp(self):
+        """Create temporary workspace directory for test datasets."""
         self.temp_dir = tempfile.TemporaryDirectory()
         self.d = Path(self.temp_dir.name)
 
     def tearDown(self):
+        """Clean up temporary directory."""
         self.temp_dir.cleanup()
 
     def test_verify_valid_sample_files(self):
+        """Verify bundled sample dataset files pass audit without errors."""
         tooluse_path = Path(__file__).resolve().parent.parent / "datasets" / "sample_tooluse_pairs.jsonl"
         rep = verify_file(tooluse_path)
         self.assertEqual(rep["status"], "PASSED")
@@ -31,6 +43,7 @@ class TestDatasetVerifier(unittest.TestCase):
         self.assertEqual(rep_repair["ast_syntax_errors"], 0)
 
     def test_verify_malformed_and_duplicate_detection(self):
+        """Verify detector catches malformed JSON lines and exact duplicates."""
         test_file = self.d / "corrupt.jsonl"
         lines = [
             json.dumps({"prompt": "p1", "chosen": "c1"}),
@@ -46,6 +59,7 @@ class TestDatasetVerifier(unittest.TestCase):
         self.assertEqual(rep["valid_records"], 2)
 
     def test_split_family_held_out_disjointness(self):
+        """Verify train and dev partitions share zero overlapping prompts."""
         rows = [
             {"prompt": f"prompt_{i}", "chosen": f"chosen_{i}", "family": f"fam_{i % 3}"}
             for i in range(30)
@@ -55,7 +69,7 @@ class TestDatasetVerifier(unittest.TestCase):
         self.assertGreater(len(dev), 0)
         self.assertEqual(len(train) + len(dev), 30)
 
-        # Enforce zero prompt overlap
+        # Enforce zero prompt overlap (strict disjointness)
         train_prompts = {r["prompt"] for r in train}
         dev_prompts = {r["prompt"] for r in dev}
         self.assertEqual(len(train_prompts & dev_prompts), 0)

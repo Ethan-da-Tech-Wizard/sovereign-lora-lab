@@ -1,5 +1,14 @@
-#!/usr/bin/env python3
-"""tests/test_sovereign_sft_lora.py — Standalone unit tests for SovereignLoRA SFT training engine."""
+# ==============================================================================
+# Program: test_sovereign_sft_lora.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Standalone unit tests for SovereignLoRA SFT training engine.
+#          Tests dataset loading with deduplication and cryptographic hash guards,
+#          deterministic family-held-out dev splitting, completion-only token masking,
+#          batch scheduling and cosine learning rate schedules, thermal pacing,
+#          serving lane validation, VRAM estimation, and tree-packed prefix sharing.
+# ==============================================================================
 
 import json
 import tempfile
@@ -10,6 +19,7 @@ from core import sovereign_sft_lora as m
 
 
 def sample_rows(n=40):
+    """Generate synthetic prompt-completion rows with known duplicate."""
     out = []
     for i in range(n):
         out.append({
@@ -22,6 +32,7 @@ def sample_rows(n=40):
 
 
 class FakeTokenizer:
+    """Mock tokenizer simulating ChatML template rendering and token conversion."""
     eos_token = "<|im_end|>"
     chat_template = "x"
 
@@ -36,19 +47,25 @@ class FakeTokenizer:
 
 
 class TestSovereignSFTLoRA(unittest.TestCase):
+    """Test suite for fine-tuning pipeline components."""
+
     def setUp(self):
+        """Create temporary directory for mock datasets and logs."""
         self.temp_dir = tempfile.TemporaryDirectory()
         self.d = Path(self.temp_dir.name)
 
     def tearDown(self):
+        """Clean up temporary directory."""
         self.temp_dir.cleanup()
 
     def write_dataset(self, rs):
+        """Write list of row dicts to temporary JSONL file."""
         p = self.d / "test_pairs.jsonl"
         p.write_text("\n".join(json.dumps(r) for r in rs))
         return p
 
     def test_load_drop_dedupe_and_hash_guard(self):
+        """Verify duplicate dropping and cryptographic hash mismatch handling."""
         rs = sample_rows(40)
         p = self.write_dataset(rs)
         kept, rep = m.load_rows(p, drop_ids=(0, 1))
@@ -64,6 +81,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(rep_lenient["drop_hash_mismatch_not_dropped"], 1)
 
     def test_split_deterministic_disjoint(self):
+        """Verify seeded dev split reproducibility and strict prompt disjointness."""
         rs = sample_rows(40)
         p = self.write_dataset(rs)
         rows, _ = m.load_rows(p)
@@ -79,6 +97,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(len(train_prompts & dev_prompts), 0)
 
     def test_completion_only_mask(self):
+        """Verify prompt tokens are masked to -100 and completion tokens remain unmasked."""
         tok = FakeTokenizer()
         ex = m.encode_example(tok, "Hello world", "Hi there!", max_len=512)
         self.assertIsNotNone(ex)
@@ -92,6 +111,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertNotEqual(labels[-1], -100)
 
     def test_schedule_and_lr(self):
+        """Verify batch schedule calculation and cosine learning rate with warmup."""
         # 100 rows, microbatch 1, accum 4 -> 4 rows per step -> 25 steps per epoch -> 75 steps for 3 epochs
         sched = m.build_schedule(n=100, micro=1, accum=4, epochs=3, seed=42)
         self.assertEqual(len(sched), 75)
@@ -103,6 +123,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertAlmostEqual(lr_peak, 2e-4)
 
     def test_cooling_plan_and_fault(self):
+        """Verify thermal state machine cooling decisions at temperature tiers."""
         # Normal temp: no cooling
         target, fixed, cap, ckpt = m.cooling_plan(75.0)
         self.assertIsNone(target)
@@ -118,6 +139,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertTrue(ckpt)
 
     def test_thermal_pacer_simulation(self):
+        """Verify ThermalPacer records temperature peaks and handles step transitions."""
         log_file = self.d / "pacer.jsonl"
         temps = [75.0, 78.0, 81.0, 76.0]
         temp_iter = iter(temps)
@@ -137,6 +159,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(summ["max_gpu_c"], 75.0)
 
     def test_serving_check(self):
+        """Verify base architecture compatibility and candidate lane checks."""
         # Target match
         ok, dec = m.serving_check("Qwen/Qwen2.5-Coder-7B-Instruct", "Qwen2.5-Coder-7B-Instruct")
         self.assertTrue(ok)
@@ -147,6 +170,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertFalse(dec_lane["production_ready"])
 
     def test_estimate_resources(self):
+        """Verify VRAM estimation accurately assesses consumer GPU limits."""
         cfg = {"base_weights_gb": 3.8, "lora_weights_gb": 0.15}
         est = m.estimate_resources(
             cfg=cfg,
@@ -162,6 +186,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertLess(est["vram_peak_gb"], 7.0)
 
     def test_pack_tree_and_prefix_sharing(self):
+        """Verify tree packing combines shared prefixes and separates completion tokens."""
         shared_prefix = [10, 20, 30]
         ex1 = {"input_ids": shared_prefix + [101, 102], "labels": [-100, -100, -100, 101, 102], "n_prompt": 3}
         ex2 = {"input_ids": shared_prefix + [201, 202], "labels": [-100, -100, -100, 201, 202], "n_prompt": 3}
@@ -176,6 +201,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(packed["ids"][3:], [101, 102, 201, 202])
 
     def test_adapter_gguf_command(self):
+        """Verify CLI formatting for GGUF export."""
         cmd = m.adapter_gguf_command("adapter_path", "base_path", "out.gguf")
         self.assertIn("convert_lora_to_gguf.py", cmd[1])
         self.assertIn("--base", cmd)

@@ -1,13 +1,16 @@
-#!/usr/bin/env python3
-"""datasets/verify_dataset.py — Dataset Validation, Deduplication & Quality Gate.
-
-Verifies:
-  1. JSONL structural syntax & schema conformance
-  2. AST syntax correctness for Python code completions
-  3. Exact duplicate prompt/completion removal
-  4. Character and token length distributions
-  5. Family-held-out disjoint train/dev split generation
-"""
+# ==============================================================================
+# Program: verify_dataset.py
+# Programmer: Ethan-da-Tech-Wizard
+# Course: CIS 156 / Advanced Systems
+# Last Modified: November 18, 2026
+# Purpose: Dataset Validation, Deduplication & Quality Gate Utility.
+#          Audits JSONL fine-tuning and alignment datasets:
+#            1. Structural JSON syntax & schema conformance validation
+#            2. Abstract Syntax Tree (AST) syntax validation for Python completions
+#            3. Exact duplicate prompt/completion removal
+#            4. Statistical character and token length distribution analysis
+#            5. Family-held-out disjoint train/dev split partitioning
+# ==============================================================================
 
 from __future__ import annotations
 
@@ -17,15 +20,40 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+
+# ==============================================================================
+# SECTION 1: Dataset Verification & Audit Function
+# Educational Note:
+# Feeding corrupted JSON or syntactically invalid Python code into an LLM fine-tuning
+# run wastes expensive GPU hours. This function acts as a pre-training quality gate,
+# catching bad lines, invalid ASTs, and duplicate prompts before training begins.
+# ==============================================================================
 
 def verify_file(
     file_path: Union[str, Path],
     mode: str = "auto",
     check_ast: bool = False,
 ) -> Dict[str, Any]:
-    """Audit a JSONL dataset file for validity, duplicates, and token lengths."""
+    """Audit a JSONL dataset file for validity, duplicates, and token lengths.
+
+    Step-by-Step Educational Pipeline:
+        1. Open the file and iterate line-by-line.
+        2. Attempt json.loads() on each line; count malformed lines.
+        3. Verify required keys ('prompt' and 'chosen') exist.
+        4. Check for duplicate prompt/completion pairs using a hash set.
+        5. (Optional) Parse code completions into Python AST to verify syntax.
+        6. Calculate character length summary statistics (min, max, mean, p50).
+
+    Parameters:
+        file_path (Union[str, Path]): Filesystem path to the JSONL dataset.
+        mode (str): Verification mode ('auto', 'sft', 'dpo').
+        check_ast (bool): If True, parses string completions with ast.parse().
+
+    Returns:
+        Dict[str, Any]: Comprehensive audit report dictionary.
+    """
     p = Path(file_path)
     if not p.exists():
         return {"status": "ERROR", "reason": f"File not found: {file_path}"}
@@ -38,6 +66,7 @@ def verify_file(
     seen_keys: Set[Tuple[str, str]] = set()
     exact_duplicates = 0
 
+    # Step 1: Scan line-by-line
     for idx, line in enumerate(lines):
         if not line.strip():
             continue
@@ -47,6 +76,7 @@ def verify_file(
             malformed += 1
             continue
 
+        # Step 2: Validate presence of essential fields
         if not isinstance(row, dict) or "prompt" not in row or "chosen" not in row:
             malformed += 1
             continue
@@ -55,12 +85,13 @@ def verify_file(
         chosen_str = row["chosen"] if isinstance(row["chosen"], str) else json.dumps(row["chosen"], sort_keys=True)
         key = (prompt, chosen_str)
 
+        # Step 3: Deduplicate exact identical pairs
         if key in seen_keys:
             exact_duplicates += 1
             continue
         seen_keys.add(key)
 
-        # Optional AST verification
+        # Step 4: Optional AST verification for Python code completions
         if check_ast and isinstance(row["chosen"], str):
             try:
                 ast.parse(row["chosen"])
@@ -69,10 +100,12 @@ def verify_file(
 
         valid_rows.append(row)
 
+    # Step 5: Compute length distributions
     prompt_lens = [len(r["prompt"]) for r in valid_rows]
     completion_lens = [len(r["chosen"] if isinstance(r["chosen"], str) else json.dumps(r["chosen"])) for r in valid_rows]
 
     def stats(lens: List[int]) -> Dict[str, Any]:
+        """Compute min, max, mean, and median (p50) from integer list."""
         if not lens:
             return {"min": 0, "max": 0, "mean": 0, "p50": 0}
         sl = sorted(lens)
@@ -96,12 +129,31 @@ def verify_file(
     }
 
 
+# ==============================================================================
+# SECTION 2: Family-Held-Out Disjoint Train / Dev Splitter
+# Educational Note:
+# Datasets often have clusters of examples belonging to the same problem family
+# (e.g. variations of binary search). If members of the same family are mixed across
+# train and dev, data leakage occurs. Family-held-out splitting isolates entire
+# families into either train or dev, preventing prompt leakage.
+# ==============================================================================
+
 def split_family_held_out(
     rows: List[Dict[str, Any]],
     dev_fraction: float = 0.2,
     seed: int = 1101,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Generate family-stratified train/dev split with zero overlapping prompts."""
+    """Generate family-stratified train/dev split with zero overlapping prompts.
+
+    Parameters:
+        rows (List[Dict[str, Any]]): Valid input dataset rows.
+        dev_fraction (float): Target fraction for validation split (default: 0.2 = 20%).
+        seed (int): Seed for deterministic random number generation.
+
+    Returns:
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: (train_rows, dev_rows)
+    """
+    # Group all rows by their family tag
     by_family: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         fam = r.get("family", "default")
@@ -111,19 +163,25 @@ def split_family_held_out(
     train: List[Dict[str, Any]] = []
     dev: List[Dict[str, Any]] = []
 
+    # Stratified split per family
     for fam, items in by_family.items():
         rng.shuffle(items)
         n_dev = max(1, int(len(items) * dev_fraction)) if len(items) > 1 else 0
         dev.extend(items[:n_dev])
         train.extend(items[n_dev:])
 
+    # Strictly enforce that no prompt in dev appears in train
     dev_prompts = {r["prompt"] for r in dev}
-    # Enforce strict disjointness
     train = [r for r in train if r["prompt"] not in dev_prompts]
     return train, dev
 
 
+# ==============================================================================
+# SECTION 3: CLI Entry Point
+# ==============================================================================
+
 def main() -> None:
+    """Parse CLI arguments to verify dataset or generate train/dev split files."""
     parser = argparse.ArgumentParser(description="Dataset Quality Gate & Verifier")
     parser.add_argument("file", help="Path to JSONL dataset")
     parser.add_argument("--check-ast", action="store_true", help="Verify AST syntax on completions")
