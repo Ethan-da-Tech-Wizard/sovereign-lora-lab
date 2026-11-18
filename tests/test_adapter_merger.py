@@ -1,12 +1,9 @@
-# ==============================================================================
-# Program: test_adapter_merger.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Unit tests for LoRA adapter merging and task arithmetic.
-#          Tests Delta_W calculation, Linear Task Arithmetic, Power Iteration
-#          Truncated SVD rank compression, TIES-Merging, and DARE sparsification.
-# ==============================================================================
+# Program: sovereign-lora-lab - test_adapter_merger.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Unit tests for LoRA delta computation, linear task arithmetic, truncated SVD merging, TIES merging and DARE sparsification.
+
+"""Unit tests for LoRA delta computation, linear task arithmetic, truncated SVD merging, TIES merging and DARE sparsification."""
 
 import unittest
 from core.adapter_merger import (

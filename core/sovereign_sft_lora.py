@@ -1,19 +1,9 @@
-# ==============================================================================
-# Program: sovereign_sft_lora.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Completion-Only SFT LoRA / QLoRA Training Engine for Edge Hardware.
-#          Engineered specifically for consumer GPUs (e.g. NVIDIA RTX 3070 8GB,
-#          Apple Silicon M-series, RTX 3090/4090):
-#            1. Completion-only cross-entropy loss (computes gradient on assistant tokens only)
-#            2. Chunked logits calculation to eliminate intermediate activation memory spikes
-#            3. Exact prefix sharing (tree packing) for multi-completion batches
-#            4. Integrated software thermal duty cycle (PI velocity loop) & fail-closed safety guards
-#            5. Deterministic family-held-out dev split & deduplication hashing guard
-#            6. Reproducible run receipt generation (cryptographic SHA256 of code, data, base, and adapter)
-#            7. Direct conversion command formatting for llama.cpp GGUF 16-bit and quantized export
-# ==============================================================================
+# Program: sovereign-lora-lab - sovereign_sft_lora.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Completion-only SFT LoRA/QLoRA training engine for consumer GPUs with chunked loss, prefix sharing, thermal pacing, data guards, run receipts and GGUF export commands.
+
+"""Completion-only SFT LoRA/QLoRA training engine for consumer GPUs with chunked loss, prefix sharing, thermal pacing, data guards, run receipts and GGUF export commands."""
 
 import argparse
 import copy
@@ -426,6 +416,7 @@ def tree_sha256(path: Union[str, Path], patterns: Tuple[str, ...] = ("*.safetens
 def git_state(repo: Union[str, Path] = REPO) -> Dict[str, Any]:
     """Record current git revision, branch, and dirty file status for provenance."""
     def run(*a):
+        """Run one git command in the repo and return its stripped output, or None on any error."""
         try:
             return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, timeout=5).stdout.strip()
         except Exception:
@@ -447,6 +438,7 @@ def build_receipt(
 ) -> Dict[str, Any]:
     """Build a complete provenance receipt linking training data, git commit, and weight hashes."""
     def sha(p):
+        """Hash a path with the supplied hash function, returning None if it is missing or hashing fails."""
         try:
             return sha_fn(p) if p and Path(p).exists() else None
         except Exception:
@@ -566,6 +558,7 @@ def encode_example(tokenizer: Any, prompt: str, chosen: Union[str, dict, list], 
 
 
 def _apply(tokenizer: Any, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], chat_template: Optional[str] = None, **kw) -> str:
+    """Render chat messages (and optional tools/template) through the tokenizer's chat template."""
     kw = dict(kw, tokenize=False, enable_thinking=False)
     if tools:
         kw["tools"] = tools
@@ -575,6 +568,7 @@ def _apply(tokenizer: Any, messages: List[Dict[str, Any]], tools: Optional[List[
 
 
 def row_messages_tools(row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """Pick the messages and tools for a dataset row according to the render mode (row, bridge or plain)."""
     if render == "row":
         if "messages" not in row:
             raise ValueError(f"row {row.get('idx')}: no 'messages'; use --render bridge or --render plain")
@@ -586,6 +580,7 @@ def row_messages_tools(row: Dict[str, Any], render: str = "row", bridge_tools: O
 
 
 def split_row(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Tuple[str, str]:
+    """Split a row into the prompt text and the assistant completion text that follows it."""
     msgs, tools = row_messages_tools(row, render, bridge_tools)
     p = _apply(tokenizer, msgs, tools, chat_template, add_generation_prompt=True)
     ch = row["chosen"]
@@ -599,6 +594,7 @@ def split_row(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_t
 
 
 def template_tail(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Optional[str]:
+    """Return the text the chat template adds after the prompt for the chosen answer, or None if it does not extend the prompt."""
     msgs, tools = row_messages_tools(row, render, bridge_tools)
     p = _apply(tokenizer, msgs, tools, chat_template, add_generation_prompt=True)
     ch = row["chosen"]
@@ -608,6 +604,7 @@ def template_tail(tokenizer: Any, row: Dict[str, Any], render: str = "row", brid
 
 
 def encode_row(tokenizer: Any, row: Dict[str, Any], max_len: int, render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Tokenize a row into input_ids and labels (prompt tokens masked with -100) or None if it exceeds max_len."""
     p, c = split_row(tokenizer, row, render, bridge_tools, chat_template)
     pi = tokenizer(p, add_special_tokens=False)["input_ids"]
     ci = tokenizer(c, add_special_tokens=False)["input_ids"]
@@ -770,6 +767,7 @@ class ThermalPacer:
         kp: float = FINE_KP,
         ki: float = FINE_KI,
     ) -> None:
+        """Set up the pacer's thresholds, injected temperature/sleep functions, counters and log path."""
         self.fine, self.target, self.kp, self.ki = bool(fine), float(target), kp, ki
         self.duty = FINE_DUTY_START
         self.prev_gpu: Optional[float] = None
@@ -789,6 +787,7 @@ class ThermalPacer:
         self.sleeps = 0
 
     def _log(self, **kw) -> None:
+        """Append one timestamped JSON event line to the pacer log file, if a log path is set."""
         kw["t"] = round(time.time(), 1)
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -796,12 +795,14 @@ class ThermalPacer:
                 f.write(json.dumps(kw) + "\n")
 
     def _track(self, gpu: Optional[float], cpu: Optional[float]) -> None:
+        """Record the highest GPU and CPU temperatures seen so far, ignoring unknown readings."""
         if tm.known(gpu):
             self.max_gpu = gpu if self.max_gpu is None else max(self.max_gpu, gpu)
         if tm.known(cpu):
             self.max_cpu = cpu if self.max_cpu is None else max(self.max_cpu, cpu)
 
     def _sleep(self, step: int, seconds: float, gpu: Optional[float], cpu: Optional[float], reason: str) -> None:
+        """Sleep for the given seconds, add it to the total slept time and log the reason."""
         self.sleep_fn(seconds)
         self.slept += seconds
         self.sleeps += 1

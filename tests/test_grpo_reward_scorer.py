@@ -1,13 +1,9 @@
-# ==============================================================================
-# Program: test_grpo_reward_scorer.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Hermetic unit tests for GRPO verifiable reward scoring.
-#          Tests command execution safety patterns, exit codes, AST syntax
-#          validation, test runner execution rewards, SQLite trajectory event logging,
-#          and contrastive DPO advantage delta calculations.
-# ==============================================================================
+# Program: sovereign-lora-lab - test_grpo_reward_scorer.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Hermetic unit tests for GRPO reward scoring of commands and code, SQLite event logging and DPO advantage deltas.
+
+"""Hermetic unit tests for GRPO reward scoring of commands and code, SQLite event logging and DPO advantage deltas."""
 
 import sqlite3
 import tempfile

@@ -1,16 +1,9 @@
-# ==============================================================================
-# Program: grpo_reward_scorer.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Deterministic GRPO Verifiable Reward Scorer & Trajectory Logger.
-#          Computes mathematically verifiable reinforcement learning rewards R in
-#          [-1.0, +1.0] for Group Relative Policy Optimization (GRPO) and Direct
-#          Preference Optimization (DPO). Evaluates commands against safety regex
-#          barriers and exit codes; validates Python code via Abstract Syntax Tree
-#          (AST) parsing, node complexity budgets, and hermetic unit tests.
-#          Logs event trajectories to SQLite in WAL mode with advantage deltas.
-# ==============================================================================
+# Program: sovereign-lora-lab - grpo_reward_scorer.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Computes deterministic GRPO/DPO rewards in [-1, 1] for commands and Python code (safety regexes, AST checks, unit tests) and logs trajectories to SQLite.
+
+"""Computes deterministic GRPO/DPO rewards in [-1, 1] for commands and Python code (safety regexes, AST checks, unit tests) and logs trajectories to SQLite."""
 
 from __future__ import annotations
 

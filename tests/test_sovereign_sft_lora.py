@@ -1,14 +1,9 @@
-# ==============================================================================
-# Program: test_sovereign_sft_lora.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Standalone unit tests for SovereignLoRA SFT training engine.
-#          Tests dataset loading with deduplication and cryptographic hash guards,
-#          deterministic family-held-out dev splitting, completion-only token masking,
-#          batch scheduling and cosine learning rate schedules, thermal pacing,
-#          serving lane validation, VRAM estimation, and tree-packed prefix sharing.
-# ==============================================================================
+# Program: sovereign-lora-lab - test_sovereign_sft_lora.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Unit tests for the SFT training engine: data loading guards, dev splits, token masking, schedules, thermal pacing, VRAM estimates and prefix packing.
+
+"""Unit tests for the SFT training engine: data loading guards, dev splits, token masking, schedules, thermal pacing, VRAM estimates and prefix packing."""
 
 import json
 import tempfile
@@ -37,12 +32,14 @@ class FakeTokenizer:
     chat_template = "x"
 
     def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False, enable_thinking=True, **kw):
+        """Fake chat-template renderer: wraps each message in ChatML-style tags."""
         s = "".join(f"<|im_start|>{x['role']}\n{x.get('content') or json.dumps(x.get('tool_calls'))}<|im_end|>\n" for x in msgs)
         if add_generation_prompt:
             s += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         return s
 
     def __call__(self, text, add_special_tokens=False):
+        """Fake tokenizer call: turn the text's UTF-8 bytes into a list of integer token ids."""
         return {"input_ids": list(text.encode())}
 
 
@@ -145,6 +142,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         temp_iter = iter(temps)
 
         def mock_gpu():
+            """Return the next fake GPU temperature, defaulting to 75.0 when the list runs out."""
             return next(temp_iter, 75.0)
 
         pacer = m.ThermalPacer(

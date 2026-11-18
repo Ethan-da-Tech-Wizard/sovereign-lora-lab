@@ -1,14 +1,7 @@
-# ==============================================================================
-# Program: __init__.py (core package)
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Top-level package exports for SovereignLoRA core engine modules:
-#          - Thermal telemetry and duty cycle pacing (thermal_monitor)
-#          - Verifiable reinforcement learning rewards & SQLite logging (grpo_reward_scorer)
-#          - Multi-LoRA SVD and TIES fusion (adapter_merger)
-#          - Autonomous DSCE Oracle & DPO preference harvesting (autonomous_dsce_trainer)
-# ==============================================================================
+# Program: sovereign-lora-lab - __init__.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Package entry point that re-exports the thermal, GRPO reward, adapter merging and DSCE trainer helpers so callers can import them from core.
 
 """SovereignLoRA Core Package."""
 

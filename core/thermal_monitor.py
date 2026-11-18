@@ -1,15 +1,9 @@
-# ==============================================================================
-# Program: thermal_monitor.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Hardware Telemetry & Thermal Duty Cycle Monitor.
-#          Provides continuous, fail-closed thermal monitoring for consumer GPUs
-#          (e.g., NVIDIA RTX 3070 8GB, Apple Silicon M-series) and CPUs during
-#          resource-intensive LLM fine-tuning and matrix operations. Prevents
-#          hardware degradation and thermal throttling through duty-cycle sleep
-#          intervals, optimizer pauses, and fail-closed safety abort gates.
-# ==============================================================================
+# Program: sovereign-lora-lab - thermal_monitor.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Reads GPU and CPU temperatures and provides a fail-closed thermal safety guard with duty-cycle sleeping for long training runs.
+
+"""Reads GPU and CPU temperatures and provides a fail-closed thermal safety guard with duty-cycle sleeping for long training runs."""
 
 from __future__ import annotations
 

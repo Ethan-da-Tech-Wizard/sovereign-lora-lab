@@ -1,13 +1,9 @@
-# ==============================================================================
-# Program: test_autonomous_dsce_trainer.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Unit tests for DSCE Oracle verification and DPO harvesting.
-#          Verifies query_dsce_oracle lookup logic, IntentCommandGuardian safety
-#          filtering, task execution and contrastive pair formation, and
-#          automated benchmark reporting.
-# ==============================================================================
+# Program: sovereign-lora-lab - test_autonomous_dsce_trainer.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Unit tests for the DSCE oracle lookup, command safety guard, task execution, DPO pair creation and benchmark reporting.
+
+"""Unit tests for the DSCE oracle lookup, command safety guard, task execution, DPO pair creation and benchmark reporting."""
 
 import json
 import tempfile

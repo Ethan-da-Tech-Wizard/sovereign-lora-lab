@@ -1,12 +1,9 @@
-# ==============================================================================
-# Program: test_dataset_verifier.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Unit tests for dataset validation, schema checking, and train/dev splitting.
-#          Tests JSON structure verification, duplicate elimination, AST syntax
-#          error detection on Python code completions, and family-held-out disjointness.
-# ==============================================================================
+# Program: sovereign-lora-lab - test_dataset_verifier.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Unit tests for dataset verification, duplicate removal, Python syntax checks and family-held-out train/dev splitting.
+
+"""Unit tests for dataset verification, duplicate removal, Python syntax checks and family-held-out train/dev splitting."""
 
 import json
 import tempfile

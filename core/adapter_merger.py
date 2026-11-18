@@ -1,16 +1,9 @@
-# ==============================================================================
-# Program: adapter_merger.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Offline Multi-LoRA Adapter Fusion & Task Arithmetic Engine.
-#          Combines multiple Low-Rank Adapters (LoRAs) into a unified master
-#          adapter or directly merges them into base model weights with zero
-#          cloud dependencies. Implements Linear Task Arithmetic, Power Iteration
-#          Truncated SVD rank compression (preserving rank r without parameter explosion),
-#          TIES-Merging (Trimming, Electing Signs, Disjoint Merging) to resolve
-#          parameter interference, and DARE (Drop And REscale) sparsification.
-# ==============================================================================
+# Program: sovereign-lora-lab - adapter_merger.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Offline LoRA adapter fusion engine implementing linear task arithmetic, power-iteration truncated SVD, TIES merging and DARE sparsification, in pure Python with optional NumPy.
+
+"""Offline LoRA adapter fusion engine implementing linear task arithmetic, power-iteration truncated SVD, TIES merging and DARE sparsification, in pure Python with optional NumPy."""
 
 from __future__ import annotations
 

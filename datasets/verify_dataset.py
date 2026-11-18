@@ -1,16 +1,9 @@
-# ==============================================================================
-# Program: verify_dataset.py
-# Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
-# Last Modified: November 18, 2026
-# Purpose: Dataset Validation, Deduplication & Quality Gate Utility.
-#          Audits JSONL fine-tuning and alignment datasets:
-#            1. Structural JSON syntax & schema conformance validation
-#            2. Abstract Syntax Tree (AST) syntax validation for Python completions
-#            3. Exact duplicate prompt/completion removal
-#            4. Statistical character and token length distribution analysis
-#            5. Family-held-out disjoint train/dev split partitioning
-# ==============================================================================
+# Program: sovereign-lora-lab - verify_dataset.py
+# Programmer: Ethan-da-Tech-Wizard (written with Claude, an AI assistant)
+# Last Modified: 2026-11-18
+# Purpose: Command-line utility that validates JSONL training datasets, removes duplicates, reports length statistics and makes a family-held-out train/dev split.
+
+"""Command-line utility that validates JSONL training datasets, removes duplicates, reports length statistics and makes a family-held-out train/dev split."""
 
 from __future__ import annotations
 
