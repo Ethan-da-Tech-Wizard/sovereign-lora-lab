@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: __init__.py (core package)
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Top-level package exports for SovereignLoRA core engine modules:
 #          - Thermal telemetry and duty cycle pacing (thermal_monitor)

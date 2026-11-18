@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: test_adapter_merger.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Unit tests for LoRA adapter merging and task arithmetic.
 #          Tests Delta_W calculation, Linear Task Arithmetic, Power Iteration

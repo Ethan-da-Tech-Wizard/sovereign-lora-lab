@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: sovereign_sft_lora.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Completion-Only SFT LoRA / QLoRA Training Engine for Edge Hardware.
 #          Engineered specifically for consumer GPUs (e.g. NVIDIA RTX 3070 8GB,

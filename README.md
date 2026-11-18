@@ -30,7 +30,7 @@ SovereignLoRA Lab is an open-source, production-ready framework for training, al
 
 ---
 
-## Educational Foundations & Core Concepts (CIS 156 / Advanced Systems)
+## Educational Foundations & Core Concepts 
 
 SovereignLoRA Lab is structured as both a high-assurance production framework and an educational laboratory for students, researchers, and systems engineers. Here is how each underlying system works:
 

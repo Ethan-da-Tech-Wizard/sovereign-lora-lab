@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: thermal_monitor.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Hardware Telemetry & Thermal Duty Cycle Monitor.
 #          Provides continuous, fail-closed thermal monitoring for consumer GPUs

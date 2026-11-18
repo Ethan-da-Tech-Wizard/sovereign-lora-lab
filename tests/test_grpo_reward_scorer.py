@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: test_grpo_reward_scorer.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Hermetic unit tests for GRPO verifiable reward scoring.
 #          Tests command execution safety patterns, exit codes, AST syntax
