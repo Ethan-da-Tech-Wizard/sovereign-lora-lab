@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: grpo_reward_scorer.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Deterministic GRPO Verifiable Reward Scorer & Trajectory Logger.
 #          Computes mathematically verifiable reinforcement learning rewards R in

@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: adapter_merger.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Offline Multi-LoRA Adapter Fusion & Task Arithmetic Engine.
 #          Combines multiple Low-Rank Adapters (LoRAs) into a unified master

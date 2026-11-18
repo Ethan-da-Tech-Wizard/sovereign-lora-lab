@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: test_sovereign_sft_lora.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Standalone unit tests for SovereignLoRA SFT training engine.
 #          Tests dataset loading with deduplication and cryptographic hash guards,

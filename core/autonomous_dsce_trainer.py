@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: autonomous_dsce_trainer.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Autonomous CLI, Web & DSCE-Gated Training Loop.
 #          Implements the Deterministic Semantic Consistency Engine (DSCE)

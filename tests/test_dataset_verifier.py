@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: test_dataset_verifier.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Unit tests for dataset validation, schema checking, and train/dev splitting.
 #          Tests JSON structure verification, duplicate elimination, AST syntax

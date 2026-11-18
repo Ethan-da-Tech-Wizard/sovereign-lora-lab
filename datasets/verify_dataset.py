@@ -1,7 +1,6 @@
 # ==============================================================================
 # Program: verify_dataset.py
 # Programmer: Ethan-da-Tech-Wizard
-# Course: CIS 156 / Advanced Systems
 # Last Modified: November 18, 2026
 # Purpose: Dataset Validation, Deduplication & Quality Gate Utility.
 #          Audits JSONL fine-tuning and alignment datasets:
