@@ -1,0 +1,6 @@
+{
+  "system_injection_header": "You have access to ONLY these exact tools:\n",
+  "tool_format": "- {name}: {description} | parameters: {parameters} | required: {required}\n",
+  "tool_instructions": "\nCRITICAL INSTRUCTIONS:\n- Call ONLY tools from the list above. Do NOT invent other tools.\n- When asked to create files or folders, edit code, run commands, or build an app, you MUST call the provided tools.\n- To execute a tool call, output ONLY a JSON list of calls: [{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}]\n",
+  "call_format": "JSON_ARRAY"
+}

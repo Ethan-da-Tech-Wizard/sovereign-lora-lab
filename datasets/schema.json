@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SovereignLoRADatasetSchema",
+  "description": "Standardized schema definitions for SFT training, DPO preference optimization, and GRPO reward logging.",
+  "definitions": {
+    "SFTPair": {
+      "type": "object",
+      "required": ["prompt", "chosen"],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "User instruction or input query."
+        },
+        "chosen": {
+          "type": ["string", "object", "array"],
+          "description": "Target response or tool invocation."
+        },
+        "family": {
+          "type": "string",
+          "description": "Task domain or generation family for disjoint cross-validation."
+        },
+        "domain": {
+          "type": "string",
+          "enum": ["tool_use", "code_repair", "cli_prompting", "ast_math", "security"],
+          "description": "Operational functional category."
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "content"],
+            "properties": {
+              "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+              "content": { "type": "string" },
+              "tool_calls": { "type": "array" }
+            }
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "DPOPair": {
+      "type": "object",
+      "required": ["prompt", "chosen", "rejected"],
+      "properties": {
+        "prompt": { "type": "string" },
+        "chosen": { "type": ["string", "object", "array"] },
+        "rejected": { "type": ["string", "object", "array"] },
+        "family": { "type": "string" },
+        "domain": { "type": "string" },
+        "advantage_delta_r": {
+          "type": "number",
+          "description": "Verifiable GRPO advantage delta: Delta R = R_chosen - R_rejected."
+        },
+        "dsce_proof": {
+          "type": "string",
+          "description": "Symbolic proof tree validating ground-truth correctness."
+        }
+      }
+    },
+    "GRPORecord": {
+      "type": "object",
+      "required": ["id", "ts", "host", "domain", "reward_score", "reward_rationale"],
+      "properties": {
+        "id": { "type": "integer" },
+        "ts": { "type": "string" },
+        "host": { "type": "string" },
+        "domain": { "type": "string" },
+        "purpose": { "type": "string" },
+        "payload": { "type": "string" },
+        "reward_score": { "type": "number", "minimum": -1.0, "maximum": 1.0 },
+        "reward_rationale": { "type": "string" }
+      }
+    }
+  }
+}
