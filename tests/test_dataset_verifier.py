@@ -79,6 +79,26 @@ class TestDatasetVerifier(unittest.TestCase):
         dev_prompts = {r["prompt"] for r in dev}
         self.assertEqual(len(train_prompts & dev_prompts), 0)
 
+    def test_split_holds_out_whole_families(self):
+        """Regression: no family may appear in both train and dev (true family hold-out)."""
+        rows = [
+            {"prompt": f"prompt_{i}", "chosen": f"chosen_{i}", "family": f"fam_{i % 4}"}
+            for i in range(40)
+        ]
+        train, dev = split_family_held_out(rows, dev_fraction=0.25, seed=7)
+        train_fams = {r["family"] for r in train}
+        dev_fams = {r["family"] for r in dev}
+        self.assertTrue(dev_fams)
+        self.assertTrue(train_fams)
+        self.assertEqual(train_fams & dev_fams, set())
+        self.assertEqual(len(train) + len(dev), 40)
+
+    def test_split_single_family_is_rejected(self):
+        """One family cannot be held out; the function says so instead of leaking."""
+        rows = [{"prompt": f"p{i}", "chosen": "c", "family": "only"} for i in range(5)]
+        with self.assertRaises(ValueError):
+            split_family_held_out(rows)
+
 
 if __name__ == "__main__":
     unittest.main()

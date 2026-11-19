@@ -47,13 +47,14 @@ def verify_file(
 
     Parameters:
         file_path (Union[str, Path]): Filesystem path to the JSONL dataset.
-        mode (str): Verification mode ('auto', 'sft', 'dpo').
+        mode (str): Reserved. Accepted for API/CLI compatibility but currently IGNORED: the same
+            checks run for every value ('auto', 'sft', 'dpo' do not change behaviour).
         check_ast (bool): If True, parses string completions with ast.parse().
 
     Returns:
         Dict[str, Any]: Comprehensive audit report dictionary.
     """
-    # Note: `mode` is accepted for CLI/API compatibility but is not used by the checks below.
+    # `mode` is intentionally unused for now (documented above); do not rely on it to select checks.
     p = Path(file_path)
     if not p.exists():
         return {"status": "ERROR", "reason": f"File not found: {file_path}"}
@@ -145,15 +146,27 @@ def split_family_held_out(
     dev_fraction: float = 0.2,
     seed: int = 1101,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Generate family-stratified train/dev split with zero overlapping prompts.
+    """Split rows so that every family lands entirely in train or entirely in dev.
+
+    Whole families are moved to dev (in a seeded random order) until dev holds at least
+    ``dev_fraction`` of the rows; at least one family always stays in train. Because the
+    unit of assignment is the family, the dev fraction is approximate (it overshoots by at
+    most one family). A final pass drops train rows whose prompt text also appears in dev
+    (duplicate prompts filed under different families), so prompts are disjoint too; in
+    that rare case train + dev can be smaller than the input.
 
     Parameters:
-        rows (List[Dict[str, Any]]): Valid input dataset rows.
-        dev_fraction (float): Target fraction for validation split (default: 0.2 = 20%).
+        rows (List[Dict[str, Any]]): Valid input dataset rows. Rows without a "family"
+            key are treated as one shared family called "default".
+        dev_fraction (float): Target fraction of rows for the dev split (0.2 = 20%).
         seed (int): Seed for deterministic random number generation.
 
     Returns:
         Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: (train_rows, dev_rows)
+
+    Raises:
+        ValueError: If the rows contain fewer than two families, because a family-held-out
+            split is impossible (it would leave train or dev empty).
     """
     # Group all rows by their family tag
     by_family: Dict[str, List[Dict[str, Any]]] = {}
@@ -161,18 +174,26 @@ def split_family_held_out(
         fam = r.get("family", "default")
         by_family.setdefault(fam, []).append(r)
 
+    if len(by_family) < 2:
+        raise ValueError("family-held-out split needs at least 2 distinct families")
+
+    # Sorted family names first so the shuffle depends only on the seed, not on row order.
     rng = random.Random(seed)
+    families = sorted(by_family)
+    rng.shuffle(families)
+
     train: List[Dict[str, Any]] = []
     dev: List[Dict[str, Any]] = []
+    target_dev = dev_fraction * len(rows)
 
-    # Stratified split per family
-    for fam, items in by_family.items():
-        rng.shuffle(items)
-        # Each family with 2+ rows contributes at least one row to dev; singleton families stay entirely in train.
-        # So this is a per-family stratified split, not a whole-family holdout; prompt disjointness is enforced afterwards.
-        n_dev = max(1, int(len(items) * dev_fraction)) if len(items) > 1 else 0
-        dev.extend(items[:n_dev])
-        train.extend(items[n_dev:])
+    # Move whole families to dev until the target is reached, always leaving the last family
+    # for train so neither side can end up empty.
+    for i, fam in enumerate(families):
+        remaining_after = len(families) - i - 1
+        if len(dev) < target_dev and (remaining_after > 0 or train):
+            dev.extend(by_family[fam])
+        else:
+            train.extend(by_family[fam])
 
     # Strictly enforce that no prompt in dev appears in train
     dev_prompts = {r["prompt"] for r in dev}
@@ -201,7 +222,11 @@ def main() -> None:
         p = Path(args.file)
         # Re-read the raw file (including duplicates) for splitting; verify_file only reports statistics.
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
-        train, dev = split_family_held_out(rows, dev_fraction=args.dev_fraction)
+        try:
+            train, dev = split_family_held_out(rows, dev_fraction=args.dev_fraction)
+        except ValueError as exc:
+            # Too few families to hold any out: report it instead of writing a leaky split.
+            raise SystemExit(f"Cannot split: {exc}")
         # Outputs sit beside the input as <name>_train.jsonl / <name>_dev.jsonl.
         train_path = p.with_name(p.stem + "_train.jsonl")
         dev_path = p.with_name(p.stem + "_dev.jsonl")
