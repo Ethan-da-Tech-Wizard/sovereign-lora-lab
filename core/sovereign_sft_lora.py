@@ -1040,11 +1040,27 @@ def preflight(args: Any, server_fn=server_is_up, free_fn=gpu_free_mib, temp_fn=N
 
 
 def write_json(path: Union[str, Path], obj: Any) -> None:
-    """Write indented JSON to disk atomically."""
+    """Write indented JSON to disk atomically.
+
+    The JSON is written to a temporary file in the same directory and then moved over the
+    target with os.replace, which is atomic on POSIX and Windows when source and target are
+    on the same filesystem. A crash mid-write therefore leaves the previous file intact
+    instead of a truncated one.
+    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    # Note: plain write_text, not temp-file+rename, despite "atomically" in the docstring.
-    p.write_text(json.dumps(obj, indent=2))
+    # Same directory as the target so the final rename never crosses a filesystem boundary.
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, p)
+    finally:
+        # Only exists if the write or replace failed; never leave temp litter behind.
+        if tmp.exists():
+            tmp.unlink()
 
 
 def dir_size_bytes(path: Union[str, Path]) -> int:
