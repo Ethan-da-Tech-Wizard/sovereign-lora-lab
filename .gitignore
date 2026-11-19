@@ -26,6 +26,8 @@ env/
 ENV/
 .venv
 
+# Training outputs are large binaries (hundreds of MB to GB) and reproducible from the recipe; keep them out of git.
+# This includes safetensors/gguf/pt weights and the runs/ and checkpoints/ directories.
 # Model weights & Checkpoints
 runs/
 checkpoints/
@@ -34,6 +36,8 @@ checkpoints/
 *.bin
 *.pt
 
+# Local state: SQLite files, the thermal pacer log (pacer.jsonl) and the operator STOP kill-switch file, which
+# exists only to halt a running job and must not be committed.
 # Local databases & logs
 *.db
 *.sqlite
