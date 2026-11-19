@@ -65,7 +65,8 @@ def gpu_temp() -> Optional[float]:
 
     Telemetry Query Strategy:
         1. Query `nvidia-smi` on systems with NVIDIA GPUs using comma-separated CSV formatting.
-        2. Query macOS memory pressure / thermal pressure index using `sysctl` on Apple Silicon.
+        2. macOS: no unprivileged GPU sensor exists, so nothing is queried and None is returned
+           (this used to return a synthetic memory-pressure-derived value, which was not a temperature).
         3. Check environment variable override (`SOVEREIGN_MOCK_GPU_TEMP`) for testing.
 
     Returns:
@@ -87,21 +88,10 @@ def gpu_temp() -> Optional[float]:
             # Fall through to subsequent checks if nvidia-smi call fails
             pass
 
-    # Step 2: Apple Silicon / macOS thermal pressure approximation
-    if sys.platform == "darwin":
-        # On macOS, native GPU temps require root IOKit/AppleSMC; fallback to memory pressure index
-        try:
-            res = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
-                                 capture_output=True, text=True, timeout=1.0)
-            if res.returncode == 0:
-                level = int(res.stdout.strip())
-                # Map 1 (normal), 2 (warn), 4 (critical) to approximate pseudo-temperatures
-                # Not a real temperature: macOS exposes no GPU sensor here, so memory-pressure level (1 normal, 2 warn, 4 critical)
-                # is mapped onto a synthetic scale (55/65/85 C) so downstream thresholds still react to system stress.
-                return 45.0 + (level * 10.0)
-        except Exception:
-            # If sysctl fails on macOS, report a mild synthetic value instead of None so training is not blocked.
-            return 50.0
+    # Step 2: macOS. There is no unprivileged GPU temperature sensor on Apple Silicon (it needs
+    # root IOKit/AppleSMC access), so this function reports None there instead of inventing a number
+    # from memory pressure. Callers treat None as "telemetry unavailable" and fail closed; use the
+    # SOVEREIGN_MOCK_GPU_TEMP override below to supply a value you trust (for example from powermetrics).
 
     # Step 3: Mock environment override for test fixtures and CI/CD pipelines
     # Test hook: lets CI and hardware-less hosts inject a temperature. Only reached when no real source answered.
