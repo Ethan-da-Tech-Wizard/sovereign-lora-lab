@@ -12,18 +12,23 @@
 """SovereignLoRA Core Package."""
 
 # Re-export the public API so callers can write `from core import ThermalSafetyGuard, ...`.
+# Thermal telemetry and safety (core/thermal_monitor.py): sensor readers plus the preflight / per-step guard
+# used before and during training.
 from core.thermal_monitor import (
     ThermalSafetyGuard,
     gpu_temp,
     cpu_temp,
     known,
 )
+# Deterministic reward functions for GRPO/DPO (core/grpo_reward_scorer.py): score a shell command or Python snippet
+# and log the event to SQLite. No model is involved, so rewards are reproducible.
 from core.grpo_reward_scorer import (
     evaluate_command_reward,
     evaluate_code_reward,
     score_dpo_pair,
     score_and_log_event,
 )
+# Pure-Python LoRA adapter fusion (core/adapter_merger.py): linear task arithmetic, SVD re-compression, TIES and DARE.
 from core.adapter_merger import (
     LoRAAdapter,
     linear_task_arithmetic,
@@ -31,12 +36,14 @@ from core.adapter_merger import (
     ties_merge,
     dare_sparsify,
 )
+# Oracle-verified preference harvesting (core/autonomous_dsce_trainer.py). Note: sovereign_sft_lora is
+# not re-exported here; import it directly (core.sovereign_sft_lora) so its helpers load only when needed.
 from core.autonomous_dsce_trainer import (
     AutonomousDSCETrainer,
     query_dsce_oracle,
 )
 
-# Names exported by `from core import *`.
+# Names exported by `from core import *`; keep in sync with the imports above.
 __all__ = [
     "ThermalSafetyGuard",
     "gpu_temp",
