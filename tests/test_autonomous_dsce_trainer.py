@@ -30,6 +30,10 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
         self.dpo_out = Path(self.temp_dir.name) / "test_dpo.jsonl"
         # Output path points into a temp dir; no model endpoint is contacted because tests pass candidate_response.
         self.trainer = AutonomousDSCETrainer(dpo_output_path=self.dpo_out)
+        # Hermetic: never talk to a real llama.cpp server that may be listening on the default port
+        # (a live server made the offline-skip tests flaky). Tests that need a model response pass
+        # candidate_response explicitly.
+        self.trainer.query_local_model = lambda prompt, timeout=3.0: None
 
     def tearDown(self):
         """Clean up temporary directory."""
