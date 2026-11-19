@@ -15,6 +15,7 @@ class TestPreflightFailClosed(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.guard = ThermalSafetyGuard(stop_file=Path(self.tmp.name) / "STOP")
 
+    # Removes the temp directory the monitor's log/state files were written into.
     def tearDown(self):
         self.tmp.cleanup()
 
