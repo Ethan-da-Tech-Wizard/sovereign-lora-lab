@@ -40,5 +40,29 @@ class TestPreflightFailClosed(unittest.TestCase):
             self.assertTrue(any("CPU" in p for p in problems))
 
 
+class TestGpuTempHonesty(unittest.TestCase):
+    """gpu_temp must not fabricate a temperature when no real sensor is available."""
+
+    def test_no_sensor_returns_none_not_synthetic_value(self):
+        """With no nvidia-smi and no env override, the answer is None on every platform."""
+        import os
+        from unittest import mock
+        from core import thermal_monitor as tm
+
+        env = {k: v for k, v in os.environ.items() if k != "SOVEREIGN_MOCK_GPU_TEMP"}
+        with mock.patch.object(tm.shutil, "which", return_value=None), mock.patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(tm.gpu_temp())
+
+    def test_env_override_still_works(self):
+        """The documented test hook keeps working for hardware-less hosts."""
+        import os
+        from unittest import mock
+        from core import thermal_monitor as tm
+
+        with mock.patch.object(tm.shutil, "which", return_value=None), \
+                mock.patch.dict(os.environ, {"SOVEREIGN_MOCK_GPU_TEMP": "61.5"}):
+            self.assertEqual(tm.gpu_temp(), 61.5)
+
+
 if __name__ == "__main__":
     unittest.main()
