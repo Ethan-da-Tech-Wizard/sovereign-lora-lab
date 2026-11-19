@@ -232,5 +232,40 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertIn("base_path", cmd)
 
 
+class TestWriteJsonAtomic(unittest.TestCase):
+    """write_json must replace the file atomically via a temp file."""
+
+    def test_roundtrip_and_no_temp_left(self):
+        """Content round-trips and no temporary file remains next to the target."""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "sub" / "out.json"
+            m.write_json(target, {"a": 1})
+            self.assertEqual(json.loads(target.read_text()), {"a": 1})
+            self.assertEqual([p.name for p in target.parent.iterdir()], ["out.json"])
+
+    def test_failed_write_keeps_previous_file(self):
+        """If serialization fails midway the old file is untouched (the atomicity guarantee)."""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "out.json"
+            m.write_json(target, {"ok": True})
+            with self.assertRaises(TypeError):
+                m.write_json(target, {"bad": object()})
+            self.assertEqual(json.loads(target.read_text()), {"ok": True})
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["out.json"])
+
+    def test_crash_before_rename_keeps_previous_file(self):
+        """Simulate a crash at the rename step: the target must still hold the old content."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "out.json"
+            m.write_json(target, {"v": 1})
+            with mock.patch.object(m.os, "replace", side_effect=OSError("crash")):
+                with self.assertRaises(OSError):
+                    m.write_json(target, {"v": 2})
+            self.assertEqual(json.loads(target.read_text()), {"v": 1})
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["out.json"])
+
+
 if __name__ == "__main__":
     unittest.main()
