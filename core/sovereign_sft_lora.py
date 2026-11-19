@@ -883,6 +883,9 @@ class ThermalPacer:
     is invoked first when one is given). Sensors, sleep and clock are injectable for tests.
     """
 
+    # Every collaborator (sensors, sleep, clock, paths) is a parameter so tests can run
+    # the whole cooling loop instantly with fake temperatures. Defaults are the real
+    # hardware readers. fine/target/kp/ki configure the optional PI pacing controller.
     def __init__(
         self,
         log_path: Optional[Union[str, Path]] = None,
