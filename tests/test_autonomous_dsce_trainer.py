@@ -89,12 +89,23 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
         self.assertFalse(record["passed"])
 
     def test_run_benchmark(self):
-        """Verify end-to-end benchmark execution across task slices."""
-        # Running three tasks without a model server uses the offline mock response; only counts and the output file are checked.
+        """Verify end-to-end benchmark execution across task slices (offline = honest skip)."""
+        # No model server is reachable in tests, so every task must be SKIPPED, not silently passed.
         report = self.trainer.run_benchmark(STANDARD_BENCHMARK_TASKS[:3])
         self.assertEqual(report["total_tasks"], 3)
-        self.assertIn("pass_rate", report)
-        self.assertTrue(self.dpo_out.exists())
+        self.assertEqual(report["passed"], 0)
+        self.assertEqual(report["skipped"], 3)
+        self.assertEqual(report["pass_rate"], 0.0)
+        # Skipped tasks must not write fabricated DPO pairs.
+        self.assertFalse(self.dpo_out.exists())
+
+    def test_offline_model_never_echoes_expected_answer(self):
+        """Regression: with no model response the task is skipped, never auto-passed."""
+        task = STANDARD_BENCHMARK_TASKS[0]
+        self.trainer.query_local_model = lambda prompt, timeout=10.0: None
+        res = self.trainer.execute_and_verify_task(task)
+        self.assertEqual(res["status"], "SKIPPED_MODEL_UNAVAILABLE")
+        self.assertIsNone(res["model_response"])
 
 
 if __name__ == "__main__":

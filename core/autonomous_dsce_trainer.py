@@ -299,10 +299,18 @@ class AutonomousDSCETrainer:
         if candidate_response is None:
             raw_response = self.query_local_model(task["prompt"])
             if not raw_response:
-                # Fallback mock response for offline / hermetic testing
-                # Offline fallback: the mock echoes expected_value, so offline runs pass the gate by construction.
-                # It exercises the pipeline only and says nothing about real model quality.
-                raw_response = f"I think the command is {task['expected_value']}"
+                # No model answered (server down / offline). Report an honest SKIP: nothing is
+                # graded and no DPO pair is written. (This used to echo task["expected_value"] as
+                # a mock response, so offline benchmarks passed by construction and polluted the
+                # harvested dataset with fake "model" answers.)
+                return {
+                    "task_id": task_id,
+                    "domain": task["domain"],
+                    "status": "SKIPPED_MODEL_UNAVAILABLE",
+                    "proven_truth": proven_answer,
+                    "model_response": None,
+                    "advantage_delta_r": None,
+                }
         else:
             raw_response = candidate_response
 
@@ -376,6 +384,7 @@ class AutonomousDSCETrainer:
         task_list = tasks or STANDARD_BENCHMARK_TASKS
         results = []
         passed_count = 0
+        skipped_count = 0
 
         # Loop through each task sequentially
         for t in task_list:
@@ -383,11 +392,15 @@ class AutonomousDSCETrainer:
             # Pass rate counts only responses that satisfied the oracle (and, for CLI tasks, the safety guardian).
             if res["status"] == "PASSED_DSCE_GATE":
                 passed_count += 1
+            # Skipped tasks (no model reachable) are reported separately and never count as passes.
+            elif res["status"] == "SKIPPED_MODEL_UNAVAILABLE":
+                skipped_count += 1
             results.append(res)
 
         return {
             "total_tasks": len(task_list),
             "passed": passed_count,
+            "skipped": skipped_count,
             # max(1, ...) avoids division by zero on an empty task list.
             "pass_rate": round(passed_count / max(1, len(task_list)), 4),
             "results": results,
@@ -414,6 +427,9 @@ def main() -> None:
     # Runs every built-in task and prints the aggregate report as JSON.
     report = trainer.run_benchmark()
     print(json.dumps(report, indent=2))
+    # Nonzero exit when any task could not be graded, so offline runs cannot look like success.
+    if report["skipped"]:
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
