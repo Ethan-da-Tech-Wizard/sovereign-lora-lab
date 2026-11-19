@@ -3,6 +3,9 @@
 # Programmer: Ethan-da-Tech-Wizard
 # Last Modified: November 18, 2026
 # Purpose: Completion-Only SFT LoRA / QLoRA Training Engine for Edge Hardware.
+#          STATUS: this file provides the engine's building blocks (data audit/split, loss
+#          math, packing, thermal pacing, receipts, GGUF export commands). Its main() does
+#          not run a training loop yet; see main()'s docstring.
 #          Engineered specifically for consumer GPUs (e.g. NVIDIA RTX 3070 8GB,
 #          Apple Silicon M-series, RTX 3090/4090):
 #            1. Completion-only cross-entropy loss (computes gradient on assistant tokens only)
@@ -1244,7 +1247,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Returns a process exit code. Note: outside --dry-run/--export-adapter-gguf this entry point loads and splits data but does not train.
 def main(argv: Optional[List[str]] = None) -> int:
-    """Main execution entry point."""
+    """Main execution entry point.
+
+    Honest scope: this CLI currently performs the data audit/split (``--dry-run`` prints
+    the report) and GGUF adapter export (``--export-adapter-gguf``). It does NOT run a
+    training loop; the thermal pacer, loss and packing helpers above are building blocks
+    exercised by the tests, not yet wired into a runnable trainer.
+
+    Returns:
+        0 for --dry-run and export; 2 when it reaches the end without training anything.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1271,7 +1283,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         }, indent=2))
         return 0
 
-    return 0
+    # Be explicit: this module ships the helpers (data audit, split, thermal pacing, receipts,
+    # loss math) but main() contains NO optimizer/training loop. Exiting 0 silently after
+    # printing nothing would look like a finished training run, so say what happened and
+    # return a distinct nonzero status.
+    print(
+        f"NOTE: data audit and split completed ({len(train_rows)} train / {len(dev_rows)} dev rows), "
+        "but no training was performed: this entry point has no training loop. "
+        "Use --dry-run for the audit report or --export-adapter-gguf for export.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":
