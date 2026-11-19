@@ -265,21 +265,26 @@ class ThermalSafetyGuard:
         if self.stop_file.exists():
             problems.append(f"STOP signal file present at {self.stop_file}")
 
-        # Check 2: GPU temperature
+        # Check 2: GPU temperature. An unreadable sensor blocks the run: this guard is documented
+        # as fail-closed, and "no telemetry" must not be mistaken for "cool enough".
         gpu = gpu_fn()
-        # Note: a missing (None/NaN) reading is skipped here rather than blocking; sovereign_sft_lora.preflight
-        # is the stricter gate that refuses when telemetry is unavailable.
-        if known(gpu) and gpu > self.start_max_gpu:
+        if not known(gpu):
+            problems.append("GPU temperature unavailable (fail-closed: cannot verify thermal safety)")
+        elif gpu > self.start_max_gpu:
             problems.append(f"GPU temperature ({gpu:.1f}°C) exceeds start ceiling ({self.start_max_gpu}°C)")
 
-        # Check 3: CPU temperature
+        # Check 3: CPU temperature (same fail-closed rule as the GPU)
         cpu = cpu_fn()
-        if known(cpu) and cpu >= self.max_cpu:
+        if not known(cpu):
+            problems.append("CPU temperature unavailable (fail-closed: cannot verify thermal safety)")
+        elif cpu >= self.max_cpu:
             problems.append(f"CPU temperature ({cpu:.1f}°C) exceeds fail-closed limit ({self.max_cpu}°C)")
 
-        # Check 4: System RAM
+        # Check 4: System RAM (same fail-closed rule)
         ram = ram_fn()
-        if known(ram) and ram < self.min_ram_gib:
+        if not known(ram):
+            problems.append("Available RAM unknown (fail-closed: cannot verify memory headroom)")
+        elif ram < self.min_ram_gib:
             problems.append(f"Available RAM ({ram:.2f} GiB) below threshold ({self.min_ram_gib:.2f} GiB)")
 
         return (len(problems) == 0, problems)
