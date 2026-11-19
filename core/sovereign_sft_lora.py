@@ -805,22 +805,50 @@ def lr_at(step: int, total: int, warmup: int, peak: float) -> float:
 
 # Environment SOVEREIGN_THERMAL_WAIT=0 disables waiting entirely. Higher bands take priority.
 def cooling_plan(gpu: float, cpu_streak: int = 0) -> Tuple[Optional[float], int, int, bool]:
-    """(sleep_target_c, fixed_sleep_s, max_sleep_s, checkpoint_first)."""
+    """Choose a coarse cooling action for one optimizer-step boundary.
+
+    Args:
+        gpu: Current GPU temperature in degrees C (already checked as known by the caller).
+        cpu_streak: Number of consecutive step boundaries with a hot CPU reading.
+
+    Returns:
+        (sleep_target_c, fixed_sleep_s, max_sleep_s, checkpoint_first):
+        - sleep_target_c: cool until the GPU is at or below this temperature (None = do not poll).
+        - fixed_sleep_s: a plain sleep when no target is used.
+        - max_sleep_s: upper bound on the total cooling wait in seconds.
+        - checkpoint_first: True when the run should save a checkpoint before waiting.
+    """
+    # Operator opt-out (SOVEREIGN_THERMAL_WAIT=0): never wait; guard_fault still enforces hard limits.
     if os.environ.get("SOVEREIGN_THERMAL_WAIT", "1") == "0":
         return None, 0, 0, False
+    # Hottest band first: save progress, then cool to HOT_TARGET (bounded by HOT_MAX seconds).
     if gpu >= HOT:
         return HOT_TARGET, 0, HOT_MAX, True
+    # Warm band (BAND_SHORT..HOT): cool to WARM_TARGET with a bounded wait.
     if gpu >= BAND_SHORT:
         return WARM_TARGET, 0, WARM_MAX, False
+    # Mild band (BAND_NONE..BAND_SHORT): a short fixed sleep to shed a little heat.
     if gpu >= BAND_NONE:
         return None, SHORT_SLEEP, SHORT_SLEEP, False
+    # GPU is fine: only a sustained hot CPU (several readings in a row) causes a pause.
     if cpu_streak >= CPU_SOFT_STREAK:
         return None, CPU_SLEEP, CPU_SLEEP, False
     return None, 0, 0, False
 
 
 def guard_fault(gpu: Optional[float], cpu: Optional[float]) -> Optional[str]:
-    """Check whether telemetry is unknown or breaches abort limits."""
+    """Check whether telemetry is unknown or breaches abort limits.
+
+    Args:
+        gpu: GPU temperature in degrees C, or None/NaN if the sensor could not be read.
+        cpu: CPU temperature in degrees C, or None/NaN.
+
+    Returns:
+        None when it is safe to continue, otherwise a human-readable reason string. An unknown GPU
+        reading is itself a fault (fail closed). Thresholds come from the SOVEREIGN_ABORT_GPU,
+        SOVEREIGN_PAUSE_GPU and SOVEREIGN_PAUSE_CPU environment variables (defaults 90 / 84 / 96 C).
+    """
+    # Fail closed: without a GPU reading we cannot prove the run is safe.
     if not tm.known(gpu):
         return "unknown GPU telemetry"
     abort_gpu = int(os.environ.get("SOVEREIGN_ABORT_GPU", 90))
@@ -844,7 +872,16 @@ def guard_fault(gpu: Optional[float], cpu: Optional[float]) -> Optional[str]:
 
 
 class ThermalPacer:
-    """Manages thermal pacing duty cycle and fail-closed safety interrupts."""
+    """Manages thermal pacing duty cycle and fail-closed safety interrupts.
+
+    Two cooperating mechanisms, driven by the training loop:
+      - after_unit(): per micro-step, only in `fine` mode. Sleeps so the GPU stays near `target`
+        using a PI (proportional-integral velocity) controller on the duty cycle.
+      - after_step(): per optimizer step. Enforces hard limits, the STOP kill-switch file and the
+        coarse cooling bands from cooling_plan().
+    Both return "ok" or "fault"; on "fault" the caller must stop training (a checkpoint callback
+    is invoked first when one is given). Sensors, sleep and clock are injectable for tests.
+    """
 
     def __init__(
         self,
@@ -882,6 +919,7 @@ class ThermalPacer:
         self.sleeps = 0
 
     def _log(self, **kw) -> None:
+        """Append one JSON line (event record plus wall-clock `t`) to log_path, if a log path was set."""
         # Wall-clock timestamp for each JSONL log line (monotonic time is used only for elapsed/summary).
         kw["t"] = round(time.time(), 1)
         if self.log_path:
@@ -890,19 +928,26 @@ class ThermalPacer:
                 f.write(json.dumps(kw) + "\n")
 
     def _track(self, gpu: Optional[float], cpu: Optional[float]) -> None:
+        """Record the running maximum GPU/CPU temperature for summary(); unknown readings are ignored."""
         if tm.known(gpu):
             self.max_gpu = gpu if self.max_gpu is None else max(self.max_gpu, gpu)
         if tm.known(cpu):
             self.max_cpu = cpu if self.max_cpu is None else max(self.max_cpu, cpu)
 
     def _sleep(self, step: int, seconds: float, gpu: Optional[float], cpu: Optional[float], reason: str) -> None:
+        """Sleep via the injectable sleep_fn, add to the totals and log why (used by coarse cooling)."""
         self.sleep_fn(seconds)
         self.slept += seconds
         self.sleeps += 1
         self._log(event="sleep", step=step, seconds=round(seconds, 1), gpu=gpu, cpu=cpu, reason=reason)
 
     def duty_update(self, gpu: float) -> float:
-        """Update duty cycle via PI velocity equation."""
+        """Update duty cycle via PI velocity equation.
+
+        duty += -kp * (gpu - prev_gpu) - ki * (gpu - target): the first term damps fast temperature
+        rises, the second pulls the temperature toward `target`. Returns the new duty in
+        [FINE_DUTY_MIN, 1.0].
+        """
         # On the first reading there is no previous sample, so the velocity term is zero.
         prev = gpu if self.prev_gpu is None else self.prev_gpu
         self.duty += -self.kp * (gpu - prev) - self.ki * (gpu - self.target)
@@ -912,7 +957,16 @@ class ThermalPacer:
         return self.duty
 
     def after_unit(self, step: int, work_s: float, checkpoint_fn=None) -> str:
-        """Called after each micro-step to apply fine-grained duty sleep."""
+        """Called after each micro-step to apply fine-grained duty sleep.
+
+        Args:
+            step: Optimizer step number (for log lines).
+            work_s: Seconds of compute the micro-step just took; the sleep is proportional to it.
+            checkpoint_fn: Optional callable that saves state before a fault is reported.
+
+        Returns:
+            "ok" to continue or "fault" (STOP file, unknown sensor, or limit breached) to stop.
+        """
         # Coarse mode: per-microstep pacing is skipped entirely.
         if not self.fine:
             return "ok"
@@ -947,7 +1001,16 @@ class ThermalPacer:
         return "ok"
 
     def after_step(self, step: int, checkpoint_fn=None) -> str:
-        """Called at optimizer step boundaries to enforce thermal thresholds."""
+        """Called at optimizer step boundaries to enforce thermal thresholds.
+
+        Args:
+            step: Optimizer step number (for log lines).
+            checkpoint_fn: Optional callable that saves state before a fault or a HOT cooldown.
+
+        Returns:
+            "ok" to continue or "fault" if the STOP file exists or a safety limit was breached
+            (before or during a cooling wait).
+        """
         if self.stop_path and self.stop_path.exists():
             self.faults.append("STOP file present")
             self._log(event="fault", step=step, reason="STOP file")
@@ -1013,7 +1076,13 @@ def server_is_up(port: int = 18190, host: str = "127.0.0.1") -> bool:
 
 
 def gpu_free_mib() -> int:
-    """Query available GPU VRAM in MiB using nvidia-smi."""
+    """Query available GPU VRAM in MiB using nvidia-smi.
+
+    Returns:
+        Free VRAM in MiB. NOTE (fail-open): when nvidia-smi is missing or fails this returns a
+        made-up 8192, so preflight's VRAM check passes on machines where VRAM cannot be measured
+        (e.g. Apple Silicon). Temperature telemetry, by contrast, is required.
+    """
     try:
         res = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=2.0)
@@ -1027,7 +1096,15 @@ def gpu_free_mib() -> int:
 
 # Refuse to start when a conflicting server holds the port, VRAM is short, or temperature sensors are unreadable.
 def preflight(args: Any, server_fn=server_is_up, free_fn=gpu_free_mib, temp_fn=None) -> Tuple[bool, List[str]]:
-    """Run comprehensive hardware and port pre-flight checks."""
+    """Run comprehensive hardware and port pre-flight checks.
+
+    Args:
+        args: Parsed CLI namespace (uses `port` and `min_free_vram_mib`, with defaults 18190 / 6000).
+        server_fn / free_fn / temp_fn: Injectable probes (port check, free VRAM, (gpu, cpu) temps) for tests.
+
+    Returns:
+        (ok, problems): ok is True only when no REFUSED message was collected.
+    """
     problems = []
     port = getattr(args, "port", 18190)
     if server_fn(port):
