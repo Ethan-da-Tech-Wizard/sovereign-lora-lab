@@ -1,3 +1,6 @@
+# STATUS: reference configuration only. No code in this repo loads these YAML files yet (there is no yaml import in core/);
+# the values document tested-style settings to copy into command-line flags or your own trainer, and mirror the defaults
+# in core/sovereign_sft_lora.py and core/thermal_monitor.py. Changing a value here does not change behaviour by itself.
 # SovereignLoRA Recipe: NVIDIA RTX 3070 Mobile / Desktop (8GB VRAM)
 # Target: Qwen2.5-Coder-7B-Instruct or Qwen2.5-3B under QLoRA 4-bit NormalFloat (NF4)
 
@@ -18,6 +21,7 @@ quantization:
 # LoRA adapter shape: rank r and scaling lora_alpha (effective scale = alpha / r); dropout regularizes the adapter;
 # target_modules lists the transformer projections that receive adapters.
 lora:
+  # LoRA rank: the width of the two low-rank matrices per adapted layer. Higher r = more capacity and more trainable parameters.
   r: 16
   lora_alpha: 32
   lora_dropout: 0.05
@@ -38,12 +42,14 @@ training:
   gradient_accumulation_steps: 16
   effective_batch_size: 16
   max_seq_length: 1024
+  # Peak learning rate for the adapter weights (LoRA tolerates a much higher rate than full fine-tuning); the scheduler below decays it.
   learning_rate: 2.0e-4
   min_learning_rate: 1.0e-5
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.05
   num_train_epochs: 3
   weight_decay: 0.01
+  # Optimizer name as understood by the Hugging Face trainer stack (paged_adamw_8bit pages optimizer state to CPU RAM to save VRAM).
   optimizer: "paged_adamw_8bit"
   # Recompute activations in the backward pass to trade compute for VRAM.
   gradient_checkpointing: true

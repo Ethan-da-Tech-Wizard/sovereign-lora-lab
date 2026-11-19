@@ -1,8 +1,13 @@
 # Core dependencies for training & evaluation
+# Deep-learning runtime; the pure-Python helpers and tests run without it (core/sovereign_sft_lora.py never imports torch at import time).
 torch>=2.0.0
+# Hugging Face model/tokenizer loading, plus peft for LoRA adapters.
 transformers>=4.40.0
 peft>=0.10.0
+# 4-bit (NF4) quantization used by the 8 GB QLoRA recipe; requires an NVIDIA GPU.
 bitsandbytes>=0.43.0
+# Device placement / mixed precision helper used by the trainer stack.
 accelerate>=0.28.0
 numpy>=1.24.0
+# Reads the recipes/*.yaml files if you load them yourself (no code here imports it yet).
 pyyaml>=6.0
