@@ -11,6 +11,7 @@
 
 """SovereignLoRA Core Package."""
 
+# Re-export the public API so callers can write `from core import ThermalSafetyGuard, ...`.
 from core.thermal_monitor import (
     ThermalSafetyGuard,
     gpu_temp,
@@ -35,6 +36,7 @@ from core.autonomous_dsce_trainer import (
     query_dsce_oracle,
 )
 
+# Names exported by `from core import *`.
 __all__ = [
     "ThermalSafetyGuard",
     "gpu_temp",

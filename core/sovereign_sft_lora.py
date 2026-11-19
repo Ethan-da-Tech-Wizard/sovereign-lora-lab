@@ -14,6 +14,8 @@
 #            7. Direct conversion command formatting for llama.cpp GGUF 16-bit and quantized export
 # ==============================================================================
 
+# Standard library only at import time: torch/transformers are never imported here, so the helpers and tests run on
+# machines without a GPU stack.
 import argparse
 import copy
 import hashlib
@@ -30,6 +32,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
+    # Prefer the package-relative import; fall back to a flat import so the file
+    # can also be run directly as a script from inside core/.
     from core import thermal_monitor as tm
 except ImportError:
     import thermal_monitor as tm
@@ -44,14 +48,22 @@ except ImportError:
 # on a 7B production lane.
 # ==============================================================================
 
+# Repository root (core/ lives one level below it); used to find datasets/ and for git provenance.
 REPO = Path(__file__).resolve().parent.parent
+# Fallback training file shipped with the repo.
 DEFAULT_DATA = REPO / "datasets" / "sample_tooluse_pairs.jsonl"
+# Model name that the production lane serves; adapters must match it (or a declared candidate lane).
 SERVING_TARGET = "Qwen2.5-Coder-7B-Instruct"
 DEFAULT_BASE = "Qwen/Qwen2.5-Coder-7B-Instruct"
+# Relative path of llama.cpp convert_lora_to_gguf.py; override with --convert-script.
 DEFAULT_CONVERT_LORA = Path("convert_lora_to_gguf.py")
+# Interpreter used to run the GGUF converter (the same one running this trainer).
 GGUF_PYTHON = sys.executable
+# Default RNG seed so dev splits and batch schedules are reproducible.
 SEED = 1101
 
+# Candidate lanes: "match" is a normalized substring that the base model name must contain,
+# "port" is the local llama.cpp server port reserved for that lane.
 LANES: Dict[str, Dict[str, Any]] = {
     "candidate-1.5b": {"match": "qwen2.5-coder-1.5b", "port": 18193, "note": "1.5B edge candidate lane"},
     "candidate-3b": {"match": "qwen2.5-3b", "port": 18194, "note": "3B general candidate lane"},
@@ -61,14 +73,25 @@ LANES: Dict[str, Dict[str, Any]] = {
 }
 
 # Thermal duty cycle parameters (temperatures in Celsius)
+# Thermal bands (deg C): below BAND_NONE no sleep; BAND_NONE..BAND_SHORT short fixed sleep;
+# BAND_SHORT..HOT cool down to WARM_TARGET; at/above HOT checkpoint then cool to HOT_TARGET.
 BAND_NONE, BAND_SHORT = 80, 84
+# GPU temperature at which we save a checkpoint before cooling.
 HOT = 87
+# Sleep/target values (seconds / deg C): SHORT_SLEEP fixed pause; *_TARGET is the temperature to cool to;
+# *_MAX caps the total cooling wait in seconds so a stuck sensor cannot hang the run.
 SHORT_SLEEP, WARM_TARGET, WARM_MAX, HOT_TARGET, HOT_MAX = 5, 78, 60, 76, 120
+# CPU soft limit: CPU_SOFT_STREAK consecutive readings >= CPU_SOFT (deg C) trigger a CPU_SLEEP-second pause.
 CPU_SOFT, CPU_SOFT_STREAK, CPU_SLEEP = 95, 3, 10
+# Upper bound on the fraction of wall time allowed for coarse cooling sleeps.
 COOL_FRACTION_CAP = 0.40
 
 # Fine-grained pacing: Proportional-Integral (PI) velocity loop
+# PI controller tuning for fine pacing: target GPU temp, proportional gain on the temperature
+# velocity (kp) and integral gain on the error from target (ki).
 FINE_TARGET, FINE_KP, FINE_KI = 78.5, 0.015, 0.006
+# Fine pacing limits: minimum duty (fraction of time computing), starting duty, max sleep per unit (s),
+# max cooling fraction, and the window (s) after which bounds apply.
 FINE_DUTY_MIN, FINE_DUTY_START, FINE_MAX_SLEEP, FINE_COOL_FRACTION_CAP, FINE_BOUND_AFTER_S = 0.12, 0.2, 20.0, 0.93, 600
 
 
@@ -82,11 +105,13 @@ FINE_DUTY_MIN, FINE_DUTY_START, FINE_MAX_SLEEP, FINE_COOL_FRACTION_CAP, FINE_BOU
 #      overlap between train and dev sets (strict disjointness).
 # ==============================================================================
 
+# Canonical text form of a completion so structured (tool-call) completions hash/dedupe consistently.
 def chosen_text(c: Union[str, dict, list]) -> str:
     """Normalize a chosen completion object (string, dict, or list) into a canonical string."""
     return c if isinstance(c, str) else json.dumps(c, sort_keys=True)
 
 
+# SHA-1 is used only as a short content fingerprint for drop-list matching, not for security.
 def row_hash(row: Dict[str, Any]) -> str:
     """Generate a deterministic 12-character SHA-1 hash of prompt + chosen completion."""
     return hashlib.sha1((row["prompt"] + chosen_text(row["chosen"])).encode()).hexdigest()[:12]
@@ -94,6 +119,8 @@ def row_hash(row: Dict[str, Any]) -> str:
 
 def load_drops(directory: Optional[Union[str, Path]] = None, pattern: str = "drop_ids_*.json") -> Tuple[set, dict, list]:
     """Load exclusion IDs and expected hashes of items to drop from training."""
+    # Missing directory means "no drops"; unreadable or malformed drop files are skipped
+    # rather than aborting the run.
     d = Path(directory) if directory else Path()
     ids, hashes, files = set(), {}, []
     if d.is_dir():
@@ -110,6 +137,7 @@ def load_drops(directory: Optional[Union[str, Path]] = None, pattern: str = "dro
 
 def _kept(idx: int, r: Dict[str, Any]) -> Dict[str, Any]:
     """Helper to assemble a clean row dictionary."""
+    # Keep only the fields the trainer needs; optional chat `messages`/`tools` ride along for --render row.
     k = {"idx": idx, "family": r.get("family", "?"), "prompt": r["prompt"], "chosen": r["chosen"]}
     if isinstance(r.get("messages"), list) and r["messages"]:
         k["messages"] = r["messages"]
@@ -141,13 +169,16 @@ def load_rows(
     Returns:
         Tuple[List[Dict[str, Any]], Dict[str, Any]]: (clean_rows, audit_report)
     """
+    # Counters for the audit report: kept rows, malformed line indices, non-blank line total, and drop-hash mismatches.
     rows, bad, total, hash_mismatch = [], [], 0, []
     p = Path(path)
+    # A missing file is reported in the audit dict rather than raised, so dry-run output stays readable.
     if not p.exists():
         return [], {"lines": 0, "kept": 0, "error": f"File not found: {path}"}
 
     # Step 1: Iterate line-by-line
     for idx, line in enumerate(p.read_text(encoding="utf-8").splitlines()):
+        # Blank lines are not counted toward `total` (they are not records).
         if not line.strip():
             continue
         total += 1
@@ -164,6 +195,8 @@ def load_rows(
 
         # Step 3: Check drop list
         if idx in drop_ids:
+            # A drop id is only honoured if the row still hashes to the recorded value; otherwise the
+            # drop list was made for a different dataset version (error, or keep the row when lenient).
             want = (drop_hashes or {}).get(idx)
             if want and row_hash(r) != want:
                 if lenient_hash:
@@ -175,6 +208,7 @@ def load_rows(
         rows.append(_kept(idx, r))
 
     # Step 4: Remove exact duplicates
+    # Order-preserving dedupe: the first occurrence of each (prompt, completion) pair wins.
     seen, uniq, dups = set(), [], 0
     for r in rows:
         k = (r["prompt"], chosen_text(r["chosen"]))
@@ -184,6 +218,7 @@ def load_rows(
         seen.add(k)
         uniq.append(r)
 
+    # `dropped_by_id` counts requested drops that fall inside the file; ids beyond the line count are ignored.
     report = {
         "lines": total,
         "dropped_by_id": len([i for i in drop_ids if i < total]) if drop_ids else 0,
@@ -216,6 +251,8 @@ def split_dev(rows: List[Dict[str, Any]], seed: int = SEED, dev_n: int = 48) -> 
     for r in rows:
         k = chosen_text(r["chosen"])
         counts[k] = counts.get(k, 0) + 1
+    # Only completions that occur exactly once are dev candidates, so dev never contains a
+    # completion that also appears in training.
     cands = [r for r in rows if counts[chosen_text(r["chosen"])] == 1]
 
     # Group candidate rows by family
@@ -228,6 +265,7 @@ def split_dev(rows: List[Dict[str, Any]], seed: int = SEED, dev_n: int = 48) -> 
 
     # Round-robin selection across families
     dev: List[Dict[str, Any]] = []
+    # Sorted family order makes the round-robin deterministic for a given seed.
     fams = sorted(by_fam)
     while len(dev) < dev_n and any(by_fam.values()):
         for f in fams:
@@ -235,6 +273,7 @@ def split_dev(rows: List[Dict[str, Any]], seed: int = SEED, dev_n: int = 48) -> 
                 dev.append(by_fam[f].pop())
 
     # Build train set excluding any dev prompt or index
+    # Remove dev rows (by index and by prompt text) so train and dev cannot share a prompt.
     dev_idx = {r["idx"] for r in dev}
     dev_prompts = {r["prompt"] for r in dev}
     train = [r for r in rows if r["idx"] not in dev_idx and r["prompt"] not in dev_prompts]
@@ -247,6 +286,7 @@ def split_dev(rows: List[Dict[str, Any]], seed: int = SEED, dev_n: int = 48) -> 
 def default_data(directory: Optional[Union[str, Path]] = None) -> Path:
     """Locate default JSONL training dataset file."""
     d = Path(directory) if directory else REPO / "datasets"
+    # Newest curated dataset wins; the bundled sample is the last-resort fallback.
     candidates = ("pairs_v3.jsonl", "pairs_v2.jsonl", "sample_tooluse_pairs.jsonl")
     for name in candidates:
         if (d / name).exists():
@@ -258,6 +298,7 @@ def default_data(directory: Optional[Union[str, Path]] = None) -> Path:
 # SECTION 3: Model Serving Verification & Tool Chat Template Rendering
 # ==============================================================================
 
+# Used for lenient model-name comparison, e.g. "Qwen2.5-Coder-7B" == "qwen25coder7b".
 def _norm_name(s: str) -> str:
     """Normalize model string by removing hyphens, underscores, dots, and lowercase."""
     return re.sub(r"[-_.]+", "", s.lower())
@@ -266,11 +307,13 @@ def _norm_name(s: str) -> str:
 def base_matches_target(base: str, target: str = SERVING_TARGET) -> bool:
     """Verify whether base model architecture name matches the serving target."""
     nb, nt = _norm_name(base), _norm_name(target)
+    # Accept an exact match, a "org/name" path match (either slash style), or the target name appearing inside the base name.
     return nb == nt or nb.endswith("/" + nt) or nb.endswith("\\" + nt) or nt in nb
 
 
 def serving_check(base: str, target: str = SERVING_TARGET, lane: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
     """Determine whether an adapter trained on `base` can be served on the production target."""
+    # Decision record is returned in every branch so callers can print or embed it in the run receipt.
     dec = {
         "base": base,
         "serving_target": target,
@@ -282,6 +325,7 @@ def serving_check(base: str, target: str = SERVING_TARGET, lane: Optional[str] =
             return False, {**dec, "ok": False, "reason": f"unknown lane {lane!r}; known: {sorted(LANES)}"}
         if _norm_name(LANES[lane]["match"]) not in _norm_name(base):
             return False, {**dec, "ok": False, "reason": f"lane {lane} requires a base naming {LANES[lane]['match']}"}
+        # Candidate lanes are for evaluation only: ok=True but production_ready=False.
         return True, {
             **dec,
             "ok": True,
@@ -303,7 +347,9 @@ def ensure_tool_system_prompt(openai_req: Dict[str, Any]) -> Dict[str, Any]:
     tools = openai_req.get("tools")
     if not tools:
         return openai_req
+    # Marker makes the injection idempotent: if the system prompt already has the tool block, skip it.
     marker = "You have access to ONLY these exact tools:"
+    # Build a plain-text tool catalogue: one line per tool with its description, parameter schema and required list.
     tool_lines = [f"\n{marker}"]
     for t in tools:
         fn = t.get("function", {})
@@ -321,6 +367,7 @@ def ensure_tool_system_prompt(openai_req: Dict[str, Any]) -> Dict[str, Any]:
     )
     prompt_addition = "\n".join(tool_lines)
 
+    # Append to an existing system message, otherwise create one at the front. Mutates the request in place.
     messages = openai_req.get("messages", [])
     if messages and messages[0].get("role") == "system":
         if marker not in messages[0]["content"]:
@@ -330,6 +377,7 @@ def ensure_tool_system_prompt(openai_req: Dict[str, Any]) -> Dict[str, Any]:
     return openai_req
 
 
+# Tool schemas in OpenAI function-calling format, used when a row carries no tools of its own.
 def default_tools() -> List[Dict[str, Any]]:
     """Standard 5 read/execute agent tools with JSON schema parameter definitions."""
     return [
@@ -357,8 +405,11 @@ def qwen_chat_render(
     enable_thinking: bool = False,
 ) -> str:
     """Pure-python fallback mirror of Qwen chat template with native tools XML block."""
+    # Mirrors the Qwen ChatML template: optional system block (with <tools> XML when tools are given),
+    # then each turn, then an assistant header. enable_thinking=False pre-fills an empty <think> block.
     out = []
     msgs = list(messages)
+    # Split off a leading system message because Qwen merges the tool block into the system turn.
     sys_text = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else None
     if sys_text is not None:
         msgs = msgs[1:]
@@ -403,6 +454,7 @@ def file_sha256(path: Union[str, Path]) -> str:
     """Compute SHA-256 cryptographic digest of a file in 4MB chunks."""
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
+        # 4 MiB chunks keep memory flat even for multi-GB weight files.
         for chunk in iter(lambda: f.read(1 << 22), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -418,12 +470,14 @@ def tree_sha256(path: Union[str, Path], patterns: Tuple[str, ...] = ("*.safetens
         return None
     h = hashlib.sha256()
     for f in files:
+        # Hash names together with digests so renaming or swapping shards changes the combined hash.
         h.update(f"{f.name}:{file_sha256(f)}\n".encode())
     return h.hexdigest()
 
 
 def git_state(repo: Union[str, Path] = REPO) -> Dict[str, Any]:
     """Record current git revision, branch, and dirty file status for provenance."""
+    # Run one git subcommand; any failure (no git, not a repo, timeout) yields None instead of raising.
     def run(*a):
         try:
             return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, timeout=5).stdout.strip()
@@ -432,6 +486,7 @@ def git_state(repo: Union[str, Path] = REPO) -> Dict[str, Any]:
     return {
         "head": run("rev-parse", "HEAD"),
         "branch": run("rev-parse", "--abbrev-ref", "HEAD"),
+        # Number of uncommitted paths; nonzero means the code differed from the recorded commit.
         "dirty_files": len((run("status", "--porcelain") or "").splitlines()),
     }
 
@@ -445,6 +500,7 @@ def build_receipt(
     git_fn=git_state,
 ) -> Dict[str, Any]:
     """Build a complete provenance receipt linking training data, git commit, and weight hashes."""
+    # Receipt hashing is best-effort: a missing or unreadable path records null instead of aborting the receipt.
     def sha(p):
         try:
             return sha_fn(p) if p and Path(p).exists() else None
@@ -459,6 +515,7 @@ def build_receipt(
         "adapter": {"path": str(adapter_path) if adapter_path else None, "sha256": sha(adapter_path)},
         "data": {"path": str(data_path), "sha256": sha(data_path)},
         "git": git_fn(),
+        # Hash of this source file ties the receipt to the exact trainer code that produced it.
         "code": {"sovereign_sft_lora": sha(Path(__file__))},
         "render": getattr(args, "render", "plain"),
         "lane": getattr(args, "lane", None),
@@ -487,6 +544,7 @@ def export_adapter_gguf(args: Any, run_fn=subprocess.run) -> int:
     adapter = Path(args.adapter_dir) if args.adapter_dir else (latest_checkpoint(out_dir) or out_dir / "adapter")
     outfile = Path(args.gguf_out) if args.gguf_out else out_dir / f"{args.run}-adapter-f16.gguf"
     convert_script = getattr(args, "convert_script", DEFAULT_CONVERT_LORA)
+    # Always build and print the command first; execution only happens with --run-conversion.
     cmd = adapter_gguf_command(adapter, args.base, outfile, script=convert_script)
     payload = {
         "mode": "export-adapter-gguf",
@@ -505,6 +563,7 @@ def export_adapter_gguf(args: Any, run_fn=subprocess.run) -> int:
         print(f"REFUSED: adapter dir {adapter} does not exist", file=sys.stderr)
         return 5
     outfile.parent.mkdir(parents=True, exist_ok=True)
+    # run_fn is injectable so tests can verify behavior without invoking llama.cpp.
     rc = run_fn(cmd).returncode
     if rc == 0 and outfile.exists():
         write_json(outfile.with_suffix(".receipt.json"), build_receipt(args, args.data, dec, adapter_path=outfile))
@@ -540,9 +599,11 @@ def split_with_template(tokenizer: Any, prompt: str, chosen: Union[str, dict, li
     if isinstance(chosen, str):
         return p, chosen + (tokenizer.eos_token if "<|im_end|>" not in chosen and tokenizer.eos_token else "")
     msgs = [chosen] if isinstance(chosen, dict) else list(chosen)
+    # Render prompt + assistant turn(s) together and cut the shared prefix off to isolate the completion text.
     full = tokenizer.apply_chat_template(user + msgs, **kw)
     if full.startswith(p):
         return p, full[len(p):].rstrip("\n")
+    # Fallback when the template rewrites the prompt part (e.g. thinking tags): take everything after the last assistant header.
     marker = "<|im_start|>assistant\n"
     if marker in full:
         return p, full[full.rfind(marker) + len(marker):].lstrip("\n").replace("<think>\n\n</think>\n\n", "").rstrip("\n")
@@ -551,12 +612,16 @@ def split_with_template(tokenizer: Any, prompt: str, chosen: Union[str, dict, li
 
 def encode_example(tokenizer: Any, prompt: str, chosen: Union[str, dict, list], max_len: int, think_prefix: bool = True, bridge_tools: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """Tokenize example into input_ids and labels with prompt tokens masked to -100."""
+    # Prefer the tokenizer's own chat template; otherwise fall back to the built-in ChatML format.
     if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
         p, c = split_with_template(tokenizer, prompt, chosen, bridge_tools)
     else:
         if not isinstance(chosen, str):
             raise ValueError("structured chosen needs a tokenizer chat template")
         p, c = format_example(prompt, chosen, think_prefix)
+    # Tokenize prompt and completion separately with no extra special tokens (the template already added them),
+    # so the boundary index is exact and the prompt can be masked with -100. Over-long examples are dropped, not truncated,
+    # because truncating a completion would train on a cut-off answer.
     pi = tokenizer(p, add_special_tokens=False)["input_ids"]
     ci = tokenizer(c, add_special_tokens=False)["input_ids"]
     if len(pi) + len(ci) > max_len:
@@ -565,6 +630,7 @@ def encode_example(tokenizer: Any, prompt: str, chosen: Union[str, dict, list], 
 
 
 def _apply(tokenizer: Any, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], chat_template: Optional[str] = None, **kw) -> str:
+    """Thin wrapper over tokenizer.apply_chat_template that forces text output and no thinking mode."""
     kw = dict(kw, tokenize=False, enable_thinking=False)
     if tools:
         kw["tools"] = tools
@@ -573,7 +639,10 @@ def _apply(tokenizer: Any, messages: List[Dict[str, Any]], tools: Optional[List[
     return tokenizer.apply_chat_template(messages, **kw)
 
 
+# Pick messages/tools for a row by render mode: "row" uses the row's own messages, "bridge" builds them
+# from the prompt plus tool list, anything else is a plain single user turn.
 def row_messages_tools(row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    """Return (messages, tools) for a dataset row under the given render mode."""
     if render == "row":
         if "messages" not in row:
             raise ValueError(f"row {row.get('idx')}: no 'messages'; use --render bridge or --render plain")
@@ -585,6 +654,7 @@ def row_messages_tools(row: Dict[str, Any], render: str = "row", bridge_tools: O
 
 
 def split_row(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Tuple[str, str]:
+    """Split a row into (prompt_text, completion_text) using the tokenizer chat template."""
     msgs, tools = row_messages_tools(row, render, bridge_tools)
     p = _apply(tokenizer, msgs, tools, chat_template, add_generation_prompt=True)
     ch = row["chosen"]
@@ -598,6 +668,7 @@ def split_row(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_t
 
 
 def template_tail(tokenizer: Any, row: Dict[str, Any], render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Optional[str]:
+    """Return the template text that follows the generation prompt for the row's completion, or None if the template does not extend the prompt."""
     msgs, tools = row_messages_tools(row, render, bridge_tools)
     p = _apply(tokenizer, msgs, tools, chat_template, add_generation_prompt=True)
     ch = row["chosen"]
@@ -607,6 +678,7 @@ def template_tail(tokenizer: Any, row: Dict[str, Any], render: str = "row", brid
 
 
 def encode_row(tokenizer: Any, row: Dict[str, Any], max_len: int, render: str = "row", bridge_tools: Optional[List[Dict[str, Any]]] = None, chat_template: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Tokenize a row; prompt tokens get label -100 (ignored by the loss). Returns None if longer than max_len."""
     p, c = split_row(tokenizer, row, render, bridge_tools, chat_template)
     pi = tokenizer(p, add_special_tokens=False)["input_ids"]
     ci = tokenizer(c, add_special_tokens=False)["input_ids"]
@@ -653,15 +725,21 @@ def estimate_resources(
         With chunked logits, we compute logits ONLY on completion tokens or in chunks of 512,
         slashing peak activation VRAM by up to 75% (from 1.8GB down to 0.45GB).
     """
+    # Defaults approximate a 7B model in 4-bit (~3.8 GB) plus a rank-16 LoRA (~0.15 GB).
     base_gb = cfg.get("base_weights_gb", 3.8)
     lora_gb = cfg.get("lora_weights_gb", 0.15)
+    # Activation memory is modeled as linear in context length (relative to 1024 tokens).
     ctx_scale = (max_len / 1024.0)
     act_gb = (0.45 if chunked_logits else 1.8) * micro * ctx_scale
+    # Fixed allowance (GB) for the CUDA context and allocator fragmentation.
     cuda_overhead = 1.2
     vram_peak_gb = round(base_gb + lora_gb + act_gb + cuda_overhead, 2)
 
+    # Tokens to process; shared prompt prefixes are only computed once per group, so subtract the saved copies.
     total_tokens = n_rows * epochs * (mean_len - (shared_prefix_tokens * (group - 1) / max(1, group)))
+    # Compute time assumes a flat tokens-per-second rate (default 120), a rough planning figure not a benchmark.
     compute_s = total_tokens / max(1.0, tok_per_s)
+    # Wall time grows as 1/(1 - sleep_fraction) because thermal sleeps interleave with compute.
     wall_s = compute_s / max(0.01, 1.0 - sleep_fraction)
 
     return {
@@ -669,19 +747,24 @@ def estimate_resources(
         "total_tokens_approx": int(total_tokens),
         "compute_seconds": round(compute_s, 1),
         "wall_seconds": round(wall_s, 1),
+        # 7.4 GB leaves headroom on an 8 GB card for the desktop/display.
         "fits_8gb_vram": vram_peak_gb <= 7.4,
     }
 
 
+# Each epoch reshuffles all row indices, then slices them into optimizer steps of micro*accum rows,
+# and each step into microbatches. Seeded, so identical runs see identical batches.
 def build_schedule(n: int, micro: int, accum: int, epochs: int, seed: int = SEED) -> List[List[List[int]]]:
     """Generate deterministically batched row indices per optimizer step."""
     steps = []
     rng = random.Random(seed)
     step_size = micro * accum
     for _ in range(epochs):
+        # Fresh permutation each epoch; the same RNG continues across epochs so epochs differ.
         perm = list(range(n))
         rng.shuffle(perm)
         for i in range(0, len(perm), step_size):
+            # One optimizer step consumes micro*accum rows; the final step of an epoch may be smaller.
             chunk = perm[i:i + step_size]
             if not chunk:
                 continue
@@ -702,6 +785,7 @@ def lr_at(step: int, total: int, warmup: int, peak: float) -> float:
     """
     if step < warmup:
         return peak * float(step + 1) / max(1.0, float(warmup))
+    # Progress through the decay phase, clamped to 1.0 so LR never rises again after total steps.
     prog = float(step - warmup) / max(1.0, float(total - warmup))
     return peak * 0.5 * (1.0 + math.cos(math.pi * min(1.0, prog)))
 
@@ -716,6 +800,7 @@ def lr_at(step: int, total: int, warmup: int, peak: float) -> float:
 # This keeps the GPU hovering at a safe, stable 78.5°C with zero thermal throttling!
 # ==============================================================================
 
+# Environment SOVEREIGN_THERMAL_WAIT=0 disables waiting entirely. Higher bands take priority.
 def cooling_plan(gpu: float, cpu_streak: int = 0) -> Tuple[Optional[float], int, int, bool]:
     """(sleep_target_c, fixed_sleep_s, max_sleep_s, checkpoint_first)."""
     if os.environ.get("SOVEREIGN_THERMAL_WAIT", "1") == "0":
@@ -740,12 +825,14 @@ def guard_fault(gpu: Optional[float], cpu: Optional[float]) -> Optional[str]:
     pause_cpu = int(os.environ.get("SOVEREIGN_PAUSE_CPU", 96))
 
     if os.environ.get("SOVEREIGN_THERMAL_WAIT", "1") == "0":
+        # With waiting disabled, only hard abort limits apply (GPU abort ceiling, CPU critical 102 C).
         if gpu >= abort_gpu:
             return f"GPU {gpu}°C >= abort ceiling {abort_gpu}°C"
         if tm.known(cpu) and cpu > 102:
             return f"CPU {cpu}°C > critical limit 102°C"
         return None
 
+    # Normal mode: any reading at or above the pause threshold is treated as a fault (fail closed).
     if gpu >= pause_gpu:
         return f"GPU {gpu}°C >= pause threshold {pause_gpu}°C"
     if tm.known(cpu) and cpu >= pause_cpu:
@@ -769,7 +856,9 @@ class ThermalPacer:
         kp: float = FINE_KP,
         ki: float = FINE_KI,
     ) -> None:
+        # fine=False disables per-microstep pacing; only after_step coarse cooling then applies.
         self.fine, self.target, self.kp, self.ki = bool(fine), float(target), kp, ki
+        # Duty = fraction of wall time spent computing; starts conservative and is adapted by the PI loop.
         self.duty = FINE_DUTY_START
         self.prev_gpu: Optional[float] = None
         self.ticks = 0
@@ -778,7 +867,9 @@ class ThermalPacer:
         self.gpu_fn = gpu_fn or tm.gpu_temp
         self.cpu_fn = cpu_fn or tm.cpu_temp
         self.sleep_fn, self.now_fn = sleep_fn, now_fn
+        # Operator kill switch: creating this file makes the next check report a fault.
         self.stop_path = Path(stop_path) if stop_path is not None else (Path.home() / ".sovereign_lora" / "STOP")
+        # Clock, sleep and sensor functions are injectable so tests run without hardware or real delays.
         self.t0 = now_fn()
         self.slept = 0.0
         self.cpu_streak = 0
@@ -788,6 +879,7 @@ class ThermalPacer:
         self.sleeps = 0
 
     def _log(self, **kw) -> None:
+        # Wall-clock timestamp for each JSONL log line (monotonic time is used only for elapsed/summary).
         kw["t"] = round(time.time(), 1)
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -808,17 +900,21 @@ class ThermalPacer:
 
     def duty_update(self, gpu: float) -> float:
         """Update duty cycle via PI velocity equation."""
+        # On the first reading there is no previous sample, so the velocity term is zero.
         prev = gpu if self.prev_gpu is None else self.prev_gpu
         self.duty += -self.kp * (gpu - prev) - self.ki * (gpu - self.target)
+        # Clamp duty to [FINE_DUTY_MIN, 1.0]: never stall completely, never exceed full speed.
         self.duty = min(1.0, max(FINE_DUTY_MIN, self.duty))
         self.prev_gpu = gpu
         return self.duty
 
     def after_unit(self, step: int, work_s: float, checkpoint_fn=None) -> str:
         """Called after each micro-step to apply fine-grained duty sleep."""
+        # Coarse mode: per-microstep pacing is skipped entirely.
         if not self.fine:
             return "ok"
         if self.stop_path and self.stop_path.exists():
+            # Return "fault" (not an exception) so the training loop can save state and exit cleanly.
             self.faults.append("STOP file present")
             self._log(event="fault", step=step, reason="STOP file")
             return "fault"
@@ -831,12 +927,15 @@ class ThermalPacer:
             if checkpoint_fn:
                 checkpoint_fn()
             return "fault"
+        # Sleep so that work/(work+sleep) equals the current duty: sleep = work*(1-duty)/duty, capped.
         sec = min(FINE_MAX_SLEEP, max(0.0, work_s * (1.0 - self.duty) / self.duty))
         self.ticks += 1
+        # Sleeps below 50 ms are not worth the scheduling overhead and are skipped.
         if sec >= 0.05:
             self.sleep_fn(sec)
             self.slept += sec
             self.sleeps += 1
+        # Re-read temperature after sleeping (the "valley") and feed that to the PI update.
         valley = self.gpu_fn()
         if tm.known(valley):
             self.duty_update(valley)
@@ -859,14 +958,17 @@ class ThermalPacer:
             if checkpoint_fn:
                 checkpoint_fn()
             return "fault"
+        # Count consecutive hot CPU readings; a single spike does not trigger a pause.
         self.cpu_streak = self.cpu_streak + 1 if tm.known(cpu) and cpu >= CPU_SOFT else 0
         target, fixed, cap, ckpt = cooling_plan(gpu, self.cpu_streak)
+        # In fine mode the per-unit duty loop handles normal heat; coarse cooling is only used at HOT.
         if self.fine and gpu < HOT:
             target, fixed, cap, ckpt = None, 0, 0, False
         if ckpt and checkpoint_fn:
             checkpoint_fn()
         if target is not None:
             waited = 0.0
+            # Poll every 5 s until cool enough or the cap is hit, re-checking safety limits each time.
             while waited < cap and gpu > target:
                 self._sleep(step, 5, gpu, cpu, f"cool to <={target}")
                 waited += 5
@@ -897,6 +999,7 @@ class ThermalPacer:
         }
 
 
+# Port probe: a successful connect means something is already listening.
 def server_is_up(port: int = 18190, host: str = "127.0.0.1") -> bool:
     """Test TCP socket connection to verify whether a server is already listening."""
     try:
@@ -915,9 +1018,11 @@ def gpu_free_mib() -> int:
             return int(res.stdout.strip().splitlines()[0])
     except Exception:
         pass
+    # Telemetry unavailable (no nvidia-smi): assume an 8 GiB card rather than failing.
     return 8192
 
 
+# Refuse to start when a conflicting server holds the port, VRAM is short, or temperature sensors are unreadable.
 def preflight(args: Any, server_fn=server_is_up, free_fn=gpu_free_mib, temp_fn=None) -> Tuple[bool, List[str]]:
     """Run comprehensive hardware and port pre-flight checks."""
     problems = []
@@ -938,6 +1043,7 @@ def write_json(path: Union[str, Path], obj: Any) -> None:
     """Write indented JSON to disk atomically."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    # Note: plain write_text, not temp-file+rename, despite "atomically" in the docstring.
     p.write_text(json.dumps(obj, indent=2))
 
 
@@ -949,6 +1055,7 @@ def dir_size_bytes(path: Union[str, Path]) -> int:
 def latest_checkpoint(out_dir: Union[str, Path]) -> Optional[Path]:
     """Find the checkpoint directory with the highest numerical step index."""
     p = Path(out_dir)
+    # Sort numerically by step suffix (checkpoint-100 after checkpoint-20); non-numeric suffixes sort first.
     ckpts = sorted(p.glob("checkpoint-*"), key=lambda x: int(x.name.split("-")[-1]) if x.name.split("-")[-1].isdigit() else 0)
     return ckpts[-1] if ckpts else None
 
@@ -973,6 +1080,7 @@ def common_prefix_len(seqs: List[List[int]]) -> int:
     """Find length of longest identical token prefix shared by all sequences."""
     if not seqs:
         return 0
+    # The common prefix cannot exceed the shortest sequence.
     shortest = min(len(s) for s in seqs)
     for i in range(shortest):
         val = seqs[0][i]
@@ -986,9 +1094,11 @@ def group_prefix_len(exs: List[Dict[str, Any]]) -> int:
     if not exs:
         return 0
     n = common_prefix_len([e["input_ids"] for e in exs])
+    # Clamp so the shared prefix stays within every prompt and leaves at least one token per example to predict.
     return max(0, min(n, min(e.get("n_prompt", len(e["input_ids"])) for e in exs), min(len(e["input_ids"]) - 1 for e in exs)))
 
 
+# Layout: [shared prefix][completion 0][completion 1]... with segment ids marking each branch.
 def pack_tree(exs: List[Dict[str, Any]], prefix_len: Optional[int] = None) -> Dict[str, Any]:
     """Pack one shared prompt prefix + K completion suffixes into a single tree-packed sequence.
 
@@ -1002,6 +1112,8 @@ def pack_tree(exs: List[Dict[str, Any]], prefix_len: Optional[int] = None) -> Di
     """
     P = group_prefix_len(exs) if prefix_len is None else prefix_len
     base = exs[0]["input_ids"][:P]
+    # Prefix tokens get segment -1 and positions 0..P-1; each completion restarts positions at P so
+    # every branch sees the same positional layout as if it were a standalone sequence.
     ids, pos, seg, pred, tgt = list(base), list(range(P)), [-1] * P, [], []
     for k, e in enumerate(exs):
         if e["input_ids"][:P] != base:
@@ -1014,6 +1126,8 @@ def pack_tree(exs: List[Dict[str, Any]], prefix_len: Optional[int] = None) -> Di
             if e["labels"][j] != -100:
                 if at - 1 < 0 or (j == P and P == 0):
                     raise ValueError("first token of a row cannot be a target")
+                # The token predicting the first completion token is the last prefix token (index P-1); later
+                # tokens are predicted by the immediately preceding packed position.
                 pred.append(P - 1 if j == P else at - 1)
                 tgt.append(e["labels"][j])
     return {"ids": ids, "pos": pos, "seg": seg, "pred": pred, "tgt": tgt, "prefix_len": P}
@@ -1030,11 +1144,13 @@ def tree_mask(torch_module: Any, seg: List[int], P: int, dtype: Any = None, leak
     s = torch_module.tensor(seg)
     L = len(seg)
     causal = torch_module.ones(L, L, dtype=torch_module.bool).tril()
+    # Allowed when same branch, or when the key position is part of the shared prefix (segment < 0).
     same = (s[:, None] == s[None, :]) | (s[None, :] < 0)
     allow = causal if leak else causal & same
     allow = allow[None, None]
     if dtype is None or dtype == torch_module.bool:
         return allow
+    # Convert the boolean mask to an additive float mask: 0 where allowed, dtype-min where blocked.
     return torch_module.zeros(allow.shape, dtype=dtype).masked_fill(~allow, torch_module.finfo(dtype).min)
 
 
@@ -1045,7 +1161,9 @@ def shared_prefix_loss(torch_module: Any, model: Any, exs: List[Dict[str, Any]],
     ids = torch_module.tensor([pk["ids"]], device=dev)
     pos = torch_module.tensor([pk["pos"] if not _pos_bug else [i for i in range(len(pk["ids"]))]], device=dev)
     mask = tree_mask(torch_module, pk["seg"], pk["prefix_len"], mask_dtype, leak=_leak).to(dev)
+    # Unwrap a PEFT model to reach the underlying transformer so we can call the trunk and lm_head separately.
     inner = model.get_base_model() if hasattr(model, "get_base_model") else model
+    # Run the transformer trunk only; hidden states come back for every packed position.
     hid = inner.model(input_ids=ids, attention_mask=mask, position_ids=pos).last_hidden_state[0]
     # Chunked logits: calculate lm_head ONLY on target prediction tokens
     logits = inner.lm_head(hid[torch_module.tensor(pk["pred"], device=dev)]).float()
@@ -1054,6 +1172,7 @@ def shared_prefix_loss(torch_module: Any, model: Any, exs: List[Dict[str, Any]],
 
 def share_groups(batch_indices: List[List[int]], share_group: int) -> List[List[int]]:
     """Partition flat batch indices into share groups."""
+    # Flatten micro-batches, then regroup into consecutive share groups of `share_group` rows.
     flat = [i for b in batch_indices for i in b]
     return [flat[i:i + share_group] for i in range(0, len(flat), max(1, share_group))]
 
@@ -1066,6 +1185,7 @@ def tokens_per_step(exs_by_step: List[List[Dict[str, Any]]], share_group: Option
         for i in range(0, len(step), share_group or len(step)):
             g = step[i:i + (share_group or len(step))]
             P = group_prefix_len(g)
+            # Packed cost: the shared prefix is counted once plus each completion's own suffix.
             shared += P + sum(len(e["input_ids"]) - P for e in g)
     return std, shared
 
@@ -1074,6 +1194,7 @@ def tokens_per_step(exs_by_step: List[List[Dict[str, Any]]], share_group: Option
 # SECTION 8: CLI Argument Parser & Entry Point
 # ==============================================================================
 
+# Flags mirror the module-level defaults; --dry-run validates data and environment without touching the GPU.
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser with comprehensive hyperparameter flags."""
     p = argparse.ArgumentParser(description="SovereignLoRA Completion-Only SFT Trainer")
@@ -1083,11 +1204,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lane", choices=sorted(LANES.keys()), default=None, help="Evaluation lane")
     p.add_argument("--out-root", default="./runs", help="Output root directory")
     p.add_argument("--run", default="run_sft_lora", help="Run identifier")
+    # LoRA rank/scale defaults match the 8 GB QLoRA recipe in recipes/rtx3070_8gb_qlora.yaml (r=16, alpha=32).
     p.add_argument("--r", type=int, default=16, help="LoRA rank")
     p.add_argument("--alpha", type=int, default=32, help="LoRA alpha scaling")
     p.add_argument("--lr", type=float, default=2e-4, help="Peak learning rate")
     p.add_argument("--epochs", type=int, default=3, help="Training epochs")
     p.add_argument("--microbatch", type=int, default=1, help="Microbatch size")
+    # With microbatch 1 and accum 16 the effective batch is 16 rows per optimizer step.
     p.add_argument("--accum", type=int, default=16, help="Gradient accumulation steps")
     p.add_argument("--max-len", type=int, default=1024, help="Maximum context length")
     p.add_argument("--seed", type=int, default=SEED, help="Random seed")
@@ -1098,24 +1221,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--convert-script", default=str(DEFAULT_CONVERT_LORA), help="Path to convert_lora_to_gguf.py")
     p.add_argument("--adapter-dir", default=None, help="Directory of adapter checkpoint to export")
     p.add_argument("--gguf-out", default=None, help="Target GGUF file path")
+    # "bridge" injects the standard tool catalogue; "row" uses messages stored in the dataset; "plain" is prompt only.
     p.add_argument("--render", choices=["plain", "bridge", "row"], default="bridge", help="Prompt render format")
     return p
 
 
+# Returns a process exit code. Note: outside --dry-run/--export-adapter-gguf this entry point loads and splits data but does not train.
 def main(argv: Optional[List[str]] = None) -> int:
     """Main execution entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # Export mode short-circuits: no data loading or training.
     if args.export_adapter_gguf:
         return export_adapter_gguf(args)
 
+    # Note: the default flow performs a data audit and split only; no optimizer loop runs here.
     rows, report = load_rows(args.data)
     if report.get("lines", 0) == 0:
         print(f"Warning: No valid rows loaded from {args.data}")
 
     train_rows, dev_rows = split_dev(rows, seed=args.seed) if rows else ([], [])
 
+    # Dry-run reports data statistics and whether temperature telemetry is readable, then exits.
     if args.dry_run:
         print(json.dumps({
             "status": "DRY_RUN_PASSED",

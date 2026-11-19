@@ -22,12 +22,14 @@ import os
 import re
 import sys
 import time
+# Network access is limited to urllib against a local endpoint (default 127.0.0.1); no third-party HTTP clients.
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Reward helpers: command safety scoring and the chosen-vs-rejected advantage (Delta R) calculation.
 from core.grpo_reward_scorer import evaluate_command_reward, score_dpo_pair
 
 # ==============================================================================
@@ -38,6 +40,8 @@ from core.grpo_reward_scorer import evaluate_command_reward, score_dpo_pair
 # task domain to exact canonical commands and formal proofs.
 # ==============================================================================
 
+# Ground-truth table keyed by (subject, predicate). Each entry gives the canonical answer string
+# that a response must contain, plus a human-readable proof line stored alongside DPO pairs.
 DSCE_KNOWLEDGE_VIALS = {
     # Area 1: Deep CLI & Compositor Management
     ("compositor", "kill_active_window"): {
@@ -81,6 +85,8 @@ DSCE_KNOWLEDGE_VIALS = {
     },
 }
 
+# Built-in benchmark. Each task's "dsce_key" indexes DSCE_KNOWLEDGE_VIALS; "domain" selects whether the
+# command-safety guardian runs; "expected_value" is the fallback truth if the vial lookup fails.
 STANDARD_BENCHMARK_TASKS: List[Dict[str, Any]] = [
     {
         "id": "TASK-CLI-001",
@@ -147,6 +153,7 @@ def query_dsce_oracle(subject: str, predicate: str) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Dictionary containing 'success', canonical 'answer', and 'proof_tree'.
     """
+    # Exact-match lookup only; unknown (subject, predicate) pairs return success=False, never a guess.
     entry = DSCE_KNOWLEDGE_VIALS.get((subject, predicate))
     if entry:
         return {
@@ -181,6 +188,7 @@ class IntentCommandGuardian:
         Returns:
             Dict[str, Any]: Verdict ('PASS' or 'FLAGGED') and rationale.
         """
+        # exit_code=0 isolates the static safety analysis: a negative score means a dangerous pattern was found.
         score, why = evaluate_command_reward(command, exit_code=0)
         if score < 0:
             return {"verdict": "FLAGGED", "reason": why}
@@ -211,8 +219,10 @@ class AutonomousDSCETrainer:
         dpo_output_path: Optional[Path] = None,
     ) -> None:
         """Initialize trainer with local model endpoint and dataset output destination."""
+        # Default is the local llama.cpp-style server on port 18190 (the production lane in sovereign_sft_lora).
         self.endpoint = endpoint or "http://127.0.0.1:18190/v1/completions"
         self.guardian = IntentCommandGuardian()
+        # Harvested pairs live under the user's home so they persist across runs and stay out of the repo.
         self.dpo_output_path = dpo_output_path or (Path.home() / ".sovereign_lora" / "dpo_harvested.jsonl")
 
     def query_local_model(self, prompt: str, timeout: float = 3.0) -> Optional[str]:
@@ -234,6 +244,7 @@ class AutonomousDSCETrainer:
                 f"<|im_start|>user\n{prompt}<|im_end|>\n"
                 "<|im_start|>assistant\n"
             ),
+            # Short, near-deterministic generation (low temperature); stop at end-of-turn or first blank line.
             "max_tokens": 128,
             "temperature": 0.1,
             "stop": ["<|im_end|>", "\n\n"],
@@ -247,6 +258,7 @@ class AutonomousDSCETrainer:
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+                # Completions-API response shape: choices[0].text.
                 return data["choices"][0]["text"].strip()
         except Exception:
             return None
@@ -273,11 +285,13 @@ class AutonomousDSCETrainer:
         Returns:
             Dict[str, Any]: Task verification result summary.
         """
+        # A task's "dsce_key" tuple selects its ground-truth vial.
         task_id = task["id"]
         sub, pred = task["dsce_key"]
 
         # 1. Query DSCE Oracle for proven ground truth
         dsce_result = query_dsce_oracle(sub, pred)
+        # If the vial is missing, fall back to the task's own expected_value so the gate still has a reference.
         proven_answer = dsce_result["answer"] or task["expected_value"]
         proof_tree = dsce_result["proof_tree"]
 
@@ -286,6 +300,8 @@ class AutonomousDSCETrainer:
             raw_response = self.query_local_model(task["prompt"])
             if not raw_response:
                 # Fallback mock response for offline / hermetic testing
+                # Offline fallback: the mock echoes expected_value, so offline runs pass the gate by construction.
+                # It exercises the pipeline only and says nothing about real model quality.
                 raw_response = f"I think the command is {task['expected_value']}"
         else:
             raw_response = candidate_response
@@ -294,18 +310,22 @@ class AutonomousDSCETrainer:
         clean_resp = re.sub(r"<think>.*?</think>", "", raw_response, flags=re.DOTALL).strip()
 
         # 4. Semantic correctness check
+        # Substring match (case-insensitive): lenient about extra words, strict about containing the exact proven value.
         truth_satisfied = proven_answer.lower() in clean_resp.lower()
 
         # 5. Safety verification for CLI domain
         if task["domain"] == "cli_prompting":
             guardian_check = self.guardian.verify(clean_resp)
+            # A correct-looking answer that also contains dangerous syntax is still rejected.
             if guardian_check["verdict"] == "FLAGGED":
                 truth_satisfied = False
 
         status = "PASSED_DSCE_GATE" if truth_satisfied else "REJECTED_BY_DSCE_GATE"
 
         # 6. Format DPO contrastive pair
+        # The chosen sample pairs the verified answer with its proof, teaching the model to justify as well as answer.
         chosen = f"{proven_answer}\n# Proof: {proof_tree}"
+        # If the model was right there is no real bad sample, so a fixed weak placeholder serves as the rejected side.
         rejected = clean_resp if not truth_satisfied else "run ambiguous guessing command"
 
         dpo_record = {
@@ -320,6 +340,7 @@ class AutonomousDSCETrainer:
         }
 
         # 7. Compute verifiable advantage margin Delta R
+        # The domain argument picks which reward function scores both sides ("command" vs "code").
         adv = score_dpo_pair(chosen, rejected, domain="command" if task["domain"] == "cli_prompting" else "code")
         dpo_record["advantage_delta_r"] = adv["advantage_delta_r"]
 
@@ -338,6 +359,7 @@ class AutonomousDSCETrainer:
     def _record_dpo(self, record: Dict[str, Any]) -> None:
         """Append verified pair to local DPO training dataset file."""
         self.dpo_output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Append mode keeps earlier harvested pairs; one JSON object per line.
         with open(self.dpo_output_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -350,6 +372,7 @@ class AutonomousDSCETrainer:
         Returns:
             Dict[str, Any]: Summary report with pass rate and task details.
         """
+        # Falls back to the full built-in suite when no explicit task list (or an empty one) is given.
         task_list = tasks or STANDARD_BENCHMARK_TASKS
         results = []
         passed_count = 0
@@ -357,6 +380,7 @@ class AutonomousDSCETrainer:
         # Loop through each task sequentially
         for t in task_list:
             res = self.execute_and_verify_task(t)
+            # Pass rate counts only responses that satisfied the oracle (and, for CLI tasks, the safety guardian).
             if res["status"] == "PASSED_DSCE_GATE":
                 passed_count += 1
             results.append(res)
@@ -364,6 +388,7 @@ class AutonomousDSCETrainer:
         return {
             "total_tasks": len(task_list),
             "passed": passed_count,
+            # max(1, ...) avoids division by zero on an empty task list.
             "pass_rate": round(passed_count / max(1, len(task_list)), 4),
             "results": results,
             "dpo_dataset": str(self.dpo_output_path),
@@ -378,6 +403,7 @@ def main() -> None:
     """Parse CLI options and execute DSCE benchmark run."""
     parser = argparse.ArgumentParser(description="Autonomous DSCE Trainer & DPO Harvester")
     parser.add_argument("--endpoint", type=str, default="http://127.0.0.1:18190/v1/completions")
+    # None means the default ~/.sovereign_lora/dpo_harvested.jsonl.
     parser.add_argument("--dpo-out", type=str, default=None)
     args = parser.parse_args()
 
@@ -385,6 +411,7 @@ def main() -> None:
         endpoint=args.endpoint,
         dpo_output_path=Path(args.dpo_out) if args.dpo_out else None,
     )
+    # Runs every built-in task and prints the aggregate report as JSON.
     report = trainer.run_benchmark()
     print(json.dumps(report, indent=2))
 

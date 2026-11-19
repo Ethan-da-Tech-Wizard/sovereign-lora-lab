@@ -1,18 +1,22 @@
 # SovereignLoRA Recipe: NVIDIA RTX 3070 Mobile / Desktop (8GB VRAM)
 # Target: Qwen2.5-Coder-7B-Instruct or Qwen2.5-3B under QLoRA 4-bit NormalFloat (NF4)
 
+# Device description and VRAM budget; usable_vram_limit_gb leaves headroom below the physical 8 GB.
 hardware:
   device_name: "NVIDIA GeForce RTX 3070 (8GB VRAM)"
   target_vram_gb: 8.0
   usable_vram_limit_gb: 7.2
   compute_capability: "sm_86"
 
+# QLoRA: base weights loaded in 4-bit NF4 with double quantization; compute runs in bfloat16.
 quantization:
   load_in_4bit: true
   bnb_4bit_quant_type: "nf4"
   bnb_4bit_use_double_quant: true
   bnb_4bit_compute_dtype: "bfloat16"
 
+# LoRA adapter shape: rank r and scaling lora_alpha (effective scale = alpha / r); dropout regularizes the adapter;
+# target_modules lists the transformer projections that receive adapters.
 lora:
   r: 16
   lora_alpha: 32
@@ -28,6 +32,7 @@ lora:
     - "up_proj"
     - "down_proj"
 
+# Optimization settings. effective_batch_size = micro_batch_size * gradient_accumulation_steps.
 training:
   micro_batch_size: 1
   gradient_accumulation_steps: 16
@@ -40,10 +45,13 @@ training:
   num_train_epochs: 3
   weight_decay: 0.01
   optimizer: "paged_adamw_8bit"
+  # Recompute activations in the backward pass to trade compute for VRAM.
   gradient_checkpointing: true
+  # Compute lm_head logits only where needed (see core/sovereign_sft_lora.py) to avoid a large vocab-sized activation spike.
   chunked_logits: true
   torch_dtype: "bfloat16"
 
+# Software thermal limits enforced during training (see core/thermal_monitor.py and ThermalPacer).
 thermal_governance:
   duty_cycle_enabled: true
   soft_gpu_temp_c: 80.0       # Linear duty sleep activated
@@ -53,6 +61,7 @@ thermal_governance:
   fail_closed_cpu_limit_c: 96.0 # Strict CPU safety ceiling
   start_max_gpu_c: 82.0       # Max temp allowed to initiate training
 
+# GGUF quantization types produced for llama.cpp inference after training.
 export:
   target_quantizations:
     - "Q4_K_M"  # Recommended for edge latency & 8GB VRAM inference

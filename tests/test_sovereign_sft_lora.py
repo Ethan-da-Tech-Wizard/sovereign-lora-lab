@@ -14,9 +14,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# Module under test, imported as `m` to keep assertions short.
 from core import sovereign_sft_lora as m
 
 
+# Row i is a structured-JSON completion except every 5th, which is a plain "REFUSE" string; four families
+# rotate so the family round-robin split has something to balance.
 def sample_rows(n=40):
     """Generate synthetic prompt-completion rows with known duplicate."""
     out = []
@@ -26,22 +29,26 @@ def sample_rows(n=40):
             "chosen": json.dumps({"action": i}) if i % 5 else "REFUSE",
             "family": f"family_{i % 4}",
         })
+    # Append a copy of row 3 so exactly one exact duplicate exists for the dedupe assertions.
     out.append(dict(out[3]))  # Exact duplicate
     return out
 
 
+# Byte-level stand-in for a HF tokenizer: no model download, fully deterministic, offline.
 class FakeTokenizer:
     """Mock tokenizer simulating ChatML template rendering and token conversion."""
     eos_token = "<|im_end|>"
     chat_template = "x"
 
     def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False, enable_thinking=True, **kw):
+        """Render ChatML text for `msgs`; mirrors the real template shape closely enough for splitting logic."""
         s = "".join(f"<|im_start|>{x['role']}\n{x.get('content') or json.dumps(x.get('tool_calls'))}<|im_end|>\n" for x in msgs)
         if add_generation_prompt:
             s += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         return s
 
     def __call__(self, text, add_special_tokens=False):
+        """Tokenize by UTF-8 bytes (one token per byte)."""
         return {"input_ids": list(text.encode())}
 
 
@@ -59,6 +66,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
 
     def write_dataset(self, rs):
         """Write list of row dicts to temporary JSONL file."""
+        # Rows are written as JSONL (one object per line) exactly like real datasets.
         p = self.d / "test_pairs.jsonl"
         p.write_text("\n".join(json.dumps(r) for r in rs))
         return p
@@ -67,11 +75,14 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         """Verify duplicate dropping and cryptographic hash mismatch handling."""
         rs = sample_rows(40)
         p = self.write_dataset(rs)
+        # Drop two rows by id; the appended exact duplicate is removed separately.
         kept, rep = m.load_rows(p, drop_ids=(0, 1))
+        # 40 rows + 1 duplicate - 1 duplicate - 2 explicit drops = 38 kept.
         self.assertEqual(rep["exact_duplicates_removed"], 1)
         self.assertEqual(len(kept), 38)
 
         # Hash guard mismatch fails closed
+        # A wrong recorded hash must abort rather than silently drop the wrong row (fail closed).
         with self.assertRaises(ValueError):
             m.load_rows(p, drop_ids=(0,), drop_hashes={0: "badhash1234"})
 
@@ -84,6 +95,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         rs = sample_rows(40)
         p = self.write_dataset(rs)
         rows, _ = m.load_rows(p)
+        # Two splits with the same seed must be identical (reproducibility).
         train_a, dev_a = m.split_dev(rows, seed=1101, dev_n=8)
         train_b, dev_b = m.split_dev(rows, seed=1101, dev_n=8)
 
@@ -97,11 +109,13 @@ class TestSovereignSFTLoRA(unittest.TestCase):
 
     def test_completion_only_mask(self):
         """Verify prompt tokens are masked to -100 and completion tokens remain unmasked."""
+        # The mask test only needs tokenization shape, so the byte-level fake tokenizer is sufficient.
         tok = FakeTokenizer()
         ex = m.encode_example(tok, "Hello world", "Hi there!", max_len=512)
         self.assertIsNotNone(ex)
         ids = ex["input_ids"]
         labels = ex["labels"]
+        # input_ids and labels must align one-to-one for the loss to line up.
         self.assertEqual(len(ids), len(labels))
 
         # First tokens should be masked with -100
@@ -112,9 +126,11 @@ class TestSovereignSFTLoRA(unittest.TestCase):
     def test_schedule_and_lr(self):
         """Verify batch schedule calculation and cosine learning rate with warmup."""
         # 100 rows, microbatch 1, accum 4 -> 4 rows per step -> 25 steps per epoch -> 75 steps for 3 epochs
+        # Schedule shape: epochs * ceil(rows / (micro*accum)) optimizer steps.
         sched = m.build_schedule(n=100, micro=1, accum=4, epochs=3, seed=42)
         self.assertEqual(len(sched), 75)
 
+        # At warmup step 2 the LR is peak * (2+1)/10, i.e. linear ramp starting from step 0 at peak/10.
         lr_warmup = m.lr_at(step=2, total=100, warmup=10, peak=2e-4)
         self.assertAlmostEqual(lr_warmup, 2e-4 * (3 / 10))
 
@@ -133,6 +149,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(fixed, 5)
 
         # Hot band: emergency cooling
+        # 88 C is at or above HOT (87), so expect cooling to 76 C with a checkpoint first.
         target, fixed, cap, ckpt = m.cooling_plan(88.0)
         self.assertEqual(target, 76)
         self.assertTrue(ckpt)
@@ -144,8 +161,11 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         temp_iter = iter(temps)
 
         def mock_gpu():
+            """Yield scripted GPU temperatures, then a steady 75.0 once the script runs out."""
             return next(temp_iter, 75.0)
 
+        # All hardware access is injected (fake GPU/CPU readers, no-op sleep) and the STOP-file path default
+        # stays untouched, so the pacer runs instantly with no real sensors.
         pacer = m.ThermalPacer(
             log_path=log_file,
             gpu_fn=mock_gpu,
@@ -164,12 +184,14 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertTrue(ok)
 
         # Candidate lane
+        # A candidate lane is servable for evaluation but must never be marked production-ready.
         ok_lane, dec_lane = m.serving_check("Qwen/Qwen2.5-Coder-1.5B", lane="candidate-1.5b")
         self.assertTrue(ok_lane)
         self.assertFalse(dec_lane["production_ready"])
 
     def test_estimate_resources(self):
         """Verify VRAM estimation accurately assesses consumer GPU limits."""
+        # Same defaults as the production estimator uses for a 4-bit 7B base plus rank-16 LoRA.
         cfg = {"base_weights_gb": 3.8, "lora_weights_gb": 0.15}
         est = m.estimate_resources(
             cfg=cfg,
@@ -182,10 +204,12 @@ class TestSovereignSFTLoRA(unittest.TestCase):
             chunked_logits=True,
         )
         self.assertTrue(est["fits_8gb_vram"])
+        # Budget check: peak must stay under 7 GB so an 8 GB card keeps headroom.
         self.assertLess(est["vram_peak_gb"], 7.0)
 
     def test_pack_tree_and_prefix_sharing(self):
         """Verify tree packing combines shared prefixes and separates completion tokens."""
+        # Two completions that share a 3-token prompt; tree packing should store the prefix once.
         shared_prefix = [10, 20, 30]
         ex1 = {"input_ids": shared_prefix + [101, 102], "labels": [-100, -100, -100, 101, 102], "n_prompt": 3}
         ex2 = {"input_ids": shared_prefix + [201, 202], "labels": [-100, -100, -100, 201, 202], "n_prompt": 3}
@@ -197,6 +221,7 @@ class TestSovereignSFTLoRA(unittest.TestCase):
         self.assertEqual(packed["prefix_len"], 3)
         self.assertEqual(packed["ids"][:3], shared_prefix)
         # Suffix tokens appended
+        # Completion suffixes are concatenated in order after the single copy of the prefix.
         self.assertEqual(packed["ids"][3:], [101, 102, 201, 202])
 
     def test_adapter_gguf_command(self):

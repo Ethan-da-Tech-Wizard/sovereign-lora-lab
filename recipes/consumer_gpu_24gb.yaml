@@ -1,16 +1,20 @@
 # SovereignLoRA Recipe: High-Capacity Consumer GPU (16GB - 24GB VRAM)
 # Target: NVIDIA GeForce RTX 3090 / 4090 / RTX 4080 (BF16 LoRA / QLoRA)
 
+# Device description and VRAM budget; usable_vram_limit_gb leaves headroom below the physical 24 GB.
 hardware:
   device_name: "NVIDIA GeForce RTX 3090 / 4090 (24GB VRAM)"
   target_vram_gb: 24.0
   usable_vram_limit_gb: 22.5
   compute_capability: "sm_86_or_sm_89"
 
+# Large-VRAM recipe: no 4-bit quantization, plain bfloat16 LoRA.
 quantization:
   load_in_4bit: false # Full unquantized BF16 base model weights for maximum fidelity
   torch_dtype: "bfloat16"
 
+# LoRA adapter shape: rank r and scaling lora_alpha (effective scale = alpha / r); dropout regularizes the adapter;
+# target_modules lists the transformer projections that receive adapters.
 lora:
   r: 32
   lora_alpha: 64
@@ -26,6 +30,7 @@ lora:
     - "up_proj"
     - "down_proj"
 
+# Optimization settings. effective_batch_size = micro_batch_size * gradient_accumulation_steps.
 training:
   micro_batch_size: 2
   gradient_accumulation_steps: 8
@@ -36,9 +41,12 @@ training:
   warmup_ratio: 0.05
   num_train_epochs: 3
   optimizer: "paged_adamw_8bit"
+  # Recompute activations in the backward pass to trade compute for VRAM.
   gradient_checkpointing: true
+  # Compute lm_head logits only where needed (see core/sovereign_sft_lora.py) to avoid a large vocab-sized activation spike.
   chunked_logits: true
 
+# Software thermal limits enforced during training (see core/thermal_monitor.py and ThermalPacer).
 thermal_governance:
   duty_cycle_enabled: true
   soft_gpu_temp_c: 75.0
@@ -47,6 +55,7 @@ thermal_governance:
   abort_gpu_temp_c: 88.0
   fail_closed_cpu_limit_c: 96.0
 
+# GGUF quantization types produced for llama.cpp inference after training.
 export:
   target_quantizations:
     - "Q4_K_M"

@@ -28,6 +28,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
         """Create temporary directory and mock trainer instance."""
         self.temp_dir = tempfile.TemporaryDirectory()
         self.dpo_out = Path(self.temp_dir.name) / "test_dpo.jsonl"
+        # Output path points into a temp dir; no model endpoint is contacted because tests pass candidate_response.
         self.trainer = AutonomousDSCETrainer(dpo_output_path=self.dpo_out)
 
     def tearDown(self):
@@ -43,6 +44,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
 
     def test_query_dsce_oracle_unknown(self):
         """Verify graceful failure on queries not present in knowledge vials."""
+        # Unknown keys must fail soft (success=False, answer None), never guess.
         res = query_dsce_oracle("unknown_sub", "unknown_pred")
         self.assertFalse(res["success"])
         self.assertIsNone(res["answer"])
@@ -51,6 +53,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
         """Verify guardian passes safe commands and flags destructive ones."""
         guardian = IntentCommandGuardian()
         # Safe command check
+        # A benign compositor command is expected to pass the guardian.
         check_safe = guardian.verify("hyprctl dispatch killactive")
         self.assertEqual(check_safe["verdict"], "PASS")
 
@@ -61,6 +64,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
     def test_execute_and_verify_task_passing(self):
         """Verify task execution records passed status and writes DPO pair."""
         task = STANDARD_BENCHMARK_TASKS[0]  # hyprctl dispatch killactive
+        # Passing an explicit candidate skips the network call entirely.
         res = self.trainer.execute_and_verify_task(task, candidate_response="hyprctl dispatch killactive")
         self.assertEqual(res["status"], "PASSED_DSCE_GATE")
         self.assertEqual(res["proven_truth"], "hyprctl dispatch killactive")
@@ -75,6 +79,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
     def test_execute_and_verify_task_rejection(self):
         """Verify task execution records rejected status when model guesses wrong."""
         task = STANDARD_BENCHMARK_TASKS[0]
+        # A wrong (and unsafe-looking) answer must be rejected and still harvested as a DPO "rejected" sample.
         res = self.trainer.execute_and_verify_task(task, candidate_response="kill -9 9999")
         self.assertEqual(res["status"], "REJECTED_BY_DSCE_GATE")
 
@@ -85,6 +90,7 @@ class TestAutonomousDSCETrainer(unittest.TestCase):
 
     def test_run_benchmark(self):
         """Verify end-to-end benchmark execution across task slices."""
+        # Running three tasks without a model server uses the offline mock response; only counts and the output file are checked.
         report = self.trainer.run_benchmark(STANDARD_BENCHMARK_TASKS[:3])
         self.assertEqual(report["total_tasks"], 3)
         self.assertIn("pass_rate", report)

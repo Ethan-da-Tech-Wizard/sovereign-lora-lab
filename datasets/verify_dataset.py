@@ -53,6 +53,7 @@ def verify_file(
     Returns:
         Dict[str, Any]: Comprehensive audit report dictionary.
     """
+    # Note: `mode` is accepted for CLI/API compatibility but is not used by the checks below.
     p = Path(file_path)
     if not p.exists():
         return {"status": "ERROR", "reason": f"File not found: {file_path}"}
@@ -62,6 +63,7 @@ def verify_file(
     valid_rows: List[Dict[str, Any]] = []
     malformed = 0
     ast_errors = 0
+    # Duplicate key = (prompt, canonical completion text).
     seen_keys: Set[Tuple[str, str]] = set()
     exact_duplicates = 0
 
@@ -81,6 +83,7 @@ def verify_file(
             continue
 
         prompt = str(row["prompt"])
+        # Structured completions (dict/list) are JSON-serialized with sorted keys so equal objects compare equal.
         chosen_str = row["chosen"] if isinstance(row["chosen"], str) else json.dumps(row["chosen"], sort_keys=True)
         key = (prompt, chosen_str)
 
@@ -165,12 +168,15 @@ def split_family_held_out(
     # Stratified split per family
     for fam, items in by_family.items():
         rng.shuffle(items)
+        # Each family with 2+ rows contributes at least one row to dev; singleton families stay entirely in train.
+        # So this is a per-family stratified split, not a whole-family holdout; prompt disjointness is enforced afterwards.
         n_dev = max(1, int(len(items) * dev_fraction)) if len(items) > 1 else 0
         dev.extend(items[:n_dev])
         train.extend(items[n_dev:])
 
     # Strictly enforce that no prompt in dev appears in train
     dev_prompts = {r["prompt"] for r in dev}
+    # Drop train rows whose prompt text also appears in dev (e.g. duplicate prompts across families).
     train = [r for r in train if r["prompt"] not in dev_prompts]
     return train, dev
 
@@ -193,8 +199,10 @@ def main() -> None:
 
     if args.split:
         p = Path(args.file)
+        # Re-read the raw file (including duplicates) for splitting; verify_file only reports statistics.
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
         train, dev = split_family_held_out(rows, dev_fraction=args.dev_fraction)
+        # Outputs sit beside the input as <name>_train.jsonl / <name>_dev.jsonl.
         train_path = p.with_name(p.stem + "_train.jsonl")
         dev_path = p.with_name(p.stem + "_dev.jsonl")
         train_path.write_text("\n".join(json.dumps(r) for r in train) + "\n", encoding="utf-8")
