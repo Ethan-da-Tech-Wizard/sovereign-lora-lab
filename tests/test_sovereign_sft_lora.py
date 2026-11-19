@@ -267,5 +267,23 @@ class TestWriteJsonAtomic(unittest.TestCase):
             self.assertEqual([p.name for p in Path(d).iterdir()], ["out.json"])
 
 
+class TestMainIsHonestAboutNoTraining(unittest.TestCase):
+    """main() has no training loop, so it must not exit 0 as if training had succeeded."""
+
+    def test_default_flow_returns_nonzero_and_says_so(self):
+        """Without --dry-run/--export, main audits the data, prints a NOTE and returns 2."""
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            data = Path(d) / "rows.jsonl"
+            data.write_text(json.dumps({"prompt": "p", "chosen": "c", "family": "f"}) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = m.main(["--data", str(data)])
+            self.assertEqual(code, 2)
+            self.assertIn("no training was performed", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
