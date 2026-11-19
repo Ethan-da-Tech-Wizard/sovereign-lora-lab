@@ -1,3 +1,4 @@
+# Packaging metadata (setuptools).
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -17,10 +18,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Only torch is required at runtime for the core modules.
 dependencies = [
     "torch>=2.0.0",
 ]
 
+# Extras: `train` adds the Hugging Face fine-tuning stack, `dev` adds the test runner.
 [project.optional-dependencies]
 train = [
     "transformers>=4.40.0",
@@ -32,6 +35,7 @@ dev = [
     "pytest>=7.0.0",
 ]
 
+# Console entry points mapped to module:function callables.
 [project.scripts]
 sovereign-sft = "core.sovereign_sft_lora:main"
 sovereign-grpo = "core.grpo_reward_scorer:main"

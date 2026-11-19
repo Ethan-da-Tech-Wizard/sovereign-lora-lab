@@ -29,6 +29,7 @@ class TestDatasetVerifier(unittest.TestCase):
 
     def test_verify_valid_sample_files(self):
         """Verify bundled sample dataset files pass audit without errors."""
+        # Sample data ships in datasets/; resolve relative to this file so the test works from any cwd.
         tooluse_path = Path(__file__).resolve().parent.parent / "datasets" / "sample_tooluse_pairs.jsonl"
         rep = verify_file(tooluse_path)
         self.assertEqual(rep["status"], "PASSED")
@@ -36,6 +37,7 @@ class TestDatasetVerifier(unittest.TestCase):
         self.assertEqual(rep["malformed_lines"], 0)
 
         repair_path = Path(__file__).resolve().parent.parent / "datasets" / "sample_code_repair_pairs.jsonl"
+        # check_ast=True additionally parses string completions as Python.
         rep_repair = verify_file(repair_path, check_ast=True)
         self.assertEqual(rep_repair["status"], "PASSED")
         self.assertGreater(rep_repair["valid_records"], 0)
@@ -44,6 +46,7 @@ class TestDatasetVerifier(unittest.TestCase):
     def test_verify_malformed_and_duplicate_detection(self):
         """Verify detector catches malformed JSON lines and exact duplicates."""
         test_file = self.d / "corrupt.jsonl"
+        # Two malformed lines (bad JSON, wrong schema) and one exact duplicate among five lines.
         lines = [
             json.dumps({"prompt": "p1", "chosen": "c1"}),
             "not a json line",
@@ -53,16 +56,19 @@ class TestDatasetVerifier(unittest.TestCase):
         ]
         test_file.write_text("\n".join(lines))
         rep = verify_file(test_file)
+        # Malformed = invalid JSON plus a row missing the required keys.
         self.assertEqual(rep["malformed_lines"], 2)
         self.assertEqual(rep["exact_duplicates_removed"], 1)
         self.assertEqual(rep["valid_records"], 2)
 
     def test_split_family_held_out_disjointness(self):
         """Verify train and dev partitions share zero overlapping prompts."""
+        # 30 synthetic rows across 3 families.
         rows = [
             {"prompt": f"prompt_{i}", "chosen": f"chosen_{i}", "family": f"fam_{i % 3}"}
             for i in range(30)
         ]
+        # Fixed seed keeps the assertions stable across runs.
         train, dev = split_family_held_out(rows, dev_fraction=0.25, seed=42)
         self.assertGreater(len(train), 0)
         self.assertGreater(len(dev), 0)

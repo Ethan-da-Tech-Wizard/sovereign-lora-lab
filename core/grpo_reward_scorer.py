@@ -35,8 +35,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # regex signatures before execution, assigning R = -1.0 to hazardous patterns.
 # ==============================================================================
 
+# Default location of the trajectory/reward database (outside the repo, per-user).
 DEFAULT_EVENTS_DB = Path.home() / ".sovereign_lora" / "events.db"
 
+# Static deny-list. Any match yields the minimum reward before the command is considered at all.
+# These are heuristics (regex), not a sandbox: they catch common destructive idioms only.
 FORBIDDEN_COMMAND_PATTERNS = [
     re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),                       # Bash fork bomb
     re.compile(r"\brm\s+-[rR][fF]?\s+(?:/[*\s]*|~[*\s]*|\.\.[*\s]*)"),              # Recursive delete on root/home
@@ -66,10 +69,12 @@ def init_db_schema(db_path: Path) -> sqlite3.Connection:
         sqlite3.Connection: Active database connection configured with WAL journaling.
     """
     # Step 1: Ensure parent directory exists
+    # Ensure the directory exists so first-time runs do not fail.
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Step 2: Establish connection and configure SQLite pragmas
     con = sqlite3.connect(str(db_path))
+    # Idempotent schema creation; the table stores one row per evaluated action with its reward and rationale.
     con.execute("PRAGMA journal_mode=WAL")       # Concurrent read/write performance
     con.execute("PRAGMA synchronous=NORMAL")     # Balance safety with speed
 
@@ -139,6 +144,7 @@ def evaluate_command_reward(
         return -0.8, f"Command failed with non-zero exit code: {exit_code}"
 
     # Step 3: Validate against output specification
+    # Clean exit earns 0.5; matching the expected output raises it to 1.0, a mismatch lowers it to 0.3.
     base_reward = 0.5
     if expected_output_pattern:
         if re.search(expected_output_pattern, stdout):
@@ -188,6 +194,7 @@ def evaluate_code_reward(
     penalty = 0.0
     if num_nodes > max_ast_tokens:
         # Linear penalty capped at 0.3 for exceeding node budget
+        # Penalty grows linearly with the overshoot fraction and is capped at 0.3.
         penalty = min(0.3, (num_nodes - max_ast_tokens) / max_ast_tokens * 0.3)
 
     base_reward = 0.5 - penalty
@@ -201,6 +208,7 @@ def evaluate_code_reward(
             else:
                 return round(0.1 - penalty, 4), "Code passed AST parse but failed unit tests."
         except Exception as e:
+            # A crashing test harness is treated as a failure, scored between failed tests and a syntax error.
             return -0.5, f"Test runner raised exception: {e}"
 
     # Return valid syntax reward adjusted for complexity
@@ -237,6 +245,7 @@ def score_dpo_pair(
     # Step 1: Score both candidates depending on domain
     if domain == "command":
         r_c, why_c = evaluate_command_reward(chosen, exit_code=0, expected_output_pattern=expected_output_pattern)
+        # The rejected command is scored as if it failed (exit 1), so any non-blocked rejected command scores -0.8.
         r_r, why_r = evaluate_command_reward(rejected, exit_code=1)
     else:  # 'code' domain
         r_c, why_c = evaluate_code_reward(chosen)
@@ -247,6 +256,7 @@ def score_dpo_pair(
 
     # Step 3: Assemble preference report
     return {
+        # A pair is only usable for contrastive training when chosen strictly out-scores rejected.
         "grpo_valid": r_c > r_r,
         "r_chosen": r_c,
         "r_rejected": r_r,

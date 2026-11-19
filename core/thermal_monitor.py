@@ -96,11 +96,15 @@ def gpu_temp() -> Optional[float]:
             if res.returncode == 0:
                 level = int(res.stdout.strip())
                 # Map 1 (normal), 2 (warn), 4 (critical) to approximate pseudo-temperatures
+                # Not a real temperature: macOS exposes no GPU sensor here, so memory-pressure level (1 normal, 2 warn, 4 critical)
+                # is mapped onto a synthetic scale (55/65/85 C) so downstream thresholds still react to system stress.
                 return 45.0 + (level * 10.0)
         except Exception:
+            # If sysctl fails on macOS, report a mild synthetic value instead of None so training is not blocked.
             return 50.0
 
     # Step 3: Mock environment override for test fixtures and CI/CD pipelines
+    # Test hook: lets CI and hardware-less hosts inject a temperature. Only reached when no real source answered.
     env_temp = os.environ.get("SOVEREIGN_MOCK_GPU_TEMP")
     if env_temp is not None:
         try:
@@ -124,6 +128,7 @@ def cpu_temp() -> Optional[float]:
         Optional[float]: CPU package temperature in Celsius, or None if unavailable.
     """
     # Step 1: Probe Linux kernel sysfs thermal zones
+    # Linux exposes each sensor as a thermal_zone with a "type" label and a "temp" file.
     thermal_zones = list(Path("/sys/class/thermal").glob("thermal_zone*"))
     for zone in thermal_zones:
         try:
@@ -132,9 +137,11 @@ def cpu_temp() -> Optional[float]:
             if type_file.exists() and temp_file.exists():
                 ztype = type_file.read_text().strip().lower()
                 # Prioritize CPU package sensors
+                # Prefer the CPU package sensor (or any zone labelled cpu); ignore e.g. battery or wifi zones.
                 if "x86_pkg_temp" in ztype or "cpu" in ztype:
                     raw_val = float(temp_file.read_text().strip())
                     # Convert from millidegrees (e.g. 52000 -> 52.0)
+                    # sysfs reports millidegrees on most kernels; values <= 1000 are assumed to already be in degrees.
                     return raw_val / 1000.0 if raw_val > 1000 else raw_val
         except Exception:
             pass
@@ -147,6 +154,7 @@ def cpu_temp() -> Optional[float]:
                 return float(env_temp)
             except ValueError:
                 pass
+        # Nominal placeholder on macOS where CPU die temperature needs privileged tooling.
         return 48.0
 
     # Step 3: Test fixture check
@@ -191,6 +199,7 @@ def ram_free_gib() -> float:
                         m = re.search(r"(\d+)", v)
                         if m:
                             pages[k.strip()] = int(m.group(1))
+                # Free plus speculative pages approximate "available" memory on macOS (vm_stat reports page counts).
                 free_pages = pages.get("Pages free", 0) + pages.get("Pages speculative", 0)
                 # Multiply by 4096 bytes per page and divide by 1024^3
                 return (free_pages * 4096) / (1024.0 ** 3)
@@ -230,6 +239,7 @@ class ThermalSafetyGuard:
         self.start_max_gpu = start_max_gpu
         self.max_cpu = max_cpu
         self.min_ram_gib = min_ram_gib
+        # Operator kill switch shared with ThermalPacer: `touch ~/.sovereign_lora/STOP` blocks new runs.
         self.stop_file = stop_file or (Path.home() / ".sovereign_lora" / "STOP")
 
     def check_preflight(
@@ -257,6 +267,8 @@ class ThermalSafetyGuard:
 
         # Check 2: GPU temperature
         gpu = gpu_fn()
+        # Note: a missing (None/NaN) reading is skipped here rather than blocking; sovereign_sft_lora.preflight
+        # is the stricter gate that refuses when telemetry is unavailable.
         if known(gpu) and gpu > self.start_max_gpu:
             problems.append(f"GPU temperature ({gpu:.1f}°C) exceeds start ceiling ({self.start_max_gpu}°C)")
 
