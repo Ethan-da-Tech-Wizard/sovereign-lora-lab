@@ -20,12 +20,14 @@ class TestPreflightFailClosed(unittest.TestCase):
 
     def test_healthy_readings_pass(self):
         """Known, cool readings and enough RAM pass with no problems."""
+        # Lambdas stand in for the real sensor functions (injectable parameters), so the test needs no GPU.
         ok, problems = self.guard.check_preflight(
             gpu_fn=lambda: 50.0, cpu_fn=lambda: 50.0, ram_fn=lambda: 32.0)
         self.assertTrue(ok, problems)
 
     def test_unknown_gpu_blocks(self):
         """A None GPU reading must block the run instead of being skipped."""
+        # gpu_fn returns None: the sensor is unreadable. Before the fix this was silently skipped and the run was allowed.
         ok, problems = self.guard.check_preflight(
             gpu_fn=lambda: None, cpu_fn=lambda: 50.0, ram_fn=lambda: 32.0)
         self.assertFalse(ok)
@@ -33,6 +35,7 @@ class TestPreflightFailClosed(unittest.TestCase):
 
     def test_unknown_cpu_and_nan_block(self):
         """None and NaN CPU readings both count as unknown."""
+        # NaN is what a broken sensor parse can produce; known() must treat it exactly like None.
         for bad in (None, float("nan")):
             ok, problems = self.guard.check_preflight(
                 gpu_fn=lambda: 50.0, cpu_fn=lambda bad=bad: bad, ram_fn=lambda: 32.0)
@@ -49,6 +52,7 @@ class TestGpuTempHonesty(unittest.TestCase):
         from unittest import mock
         from core import thermal_monitor as tm
 
+        # Strip any real override from the environment so the result depends only on the (mocked) absence of sensors.
         env = {k: v for k, v in os.environ.items() if k != "SOVEREIGN_MOCK_GPU_TEMP"}
         with mock.patch.object(tm.shutil, "which", return_value=None), mock.patch.dict(os.environ, env, clear=True):
             self.assertIsNone(tm.gpu_temp())
