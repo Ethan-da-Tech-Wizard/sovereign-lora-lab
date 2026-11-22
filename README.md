@@ -203,6 +203,25 @@ Explore related high-assurance open source security and autonomous systems proje
 
 ---
 
+## Visual Walkthrough & Diagnostics
+
+<p align="center">
+  <img src="docs/assets/lora_training_pipeline.svg" alt="Sovereign LoRA Fine-Tuning Session" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/assets/thermal_guard_monitoring.svg" alt="Thermal Preflight & Real-Time Hardware Sentinel" width="860">
+</p>
+
+## Magi Standards & AI Contributor Onboarding
+
+All training pipelines, thermal guards, and reward scorers adhere to the **[Magi Bible: Engineering Foundations & Safety Standards for AI Coding](MAGI_BIBLE.md)** and **[MAGI_LOOK_HERE.md](MAGI_LOOK_HERE.md)**:
+- **[MAGI_LOOK_HERE.md](MAGI_LOOK_HERE.md)**: Universal contributor & AI agent onboarding guide, visual walkthrough requirements, zero-PII validation rules.
+- **[MAGI_BIBLE.md](MAGI_BIBLE.md)**: Core engineering foundations, multi-seat governance, and verification checklists.
+- **Rule 16 Commenting Invariant:** Code contains comprehensive structural headers and inline rationale.
+- **Hardware Safety:** Fail-closed thermal monitoring aborts execution before hardware thermal limits are reached.
+- **Zero Secrets & Leak-Scrubbed:** Free of private tokens, paths, or personal hostnames.
+
 ## License
 
 Dual-licensed under either:
